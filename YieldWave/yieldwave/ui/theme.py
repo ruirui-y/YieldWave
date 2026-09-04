@@ -53,12 +53,6 @@ def build_qss() -> str:
     QMainWindow, QDialog {{
         background-color: {APP_BG};
     }}
-    QFrame#CardFrame {{
-        background-color: {CARD_BG};
-        border: 1px solid {BORDER};
-        border-radius: 8px;
-        padding: 10px;
-    }}
     QFrame#HeroBanner {{
         background-color: {CARD_BG};
         border: 1px solid {BORDER};
@@ -302,6 +296,36 @@ def build_qss() -> str:
         background: {CARD_BG};
     }}
 
+
+    QLabel#AppTitle {{ font-size: 13pt; font-weight: 700; color: {TEXT_PRIMARY}; }}
+    QFrame#HeroBanner {{
+      background: {CARD_BG}; border: 1px solid {BORDER};
+      border-left: 4px solid {WAIT}; border-radius: 6px;
+    }}
+    QFrame#HeroBanner[action="buy"]  {{ border-left-color: {BUY}; }}
+    QFrame#HeroBanner[action="sell"] {{ border-left-color: {SELL}; }}
+    QLabel#HeroTitle {{ font-size: 15pt; font-weight: 700; color: {TEXT_PRIMARY}; }}
+    QLabel#HeroSub   {{ font-size: 10pt; color: {TEXT_SECONDARY}; }}
+    QFrame#KpiStrip  {{ background: {CARD_BG}; border: 1px solid {BORDER};
+                       border-radius: 8px; }}
+    QFrame#KpiStrip QFrame[frameShape="4"] {{ color: {BORDER}; }}
+    QLabel#KpiLabel  {{ font-size: 10pt; color: {TEXT_MUTED}; }}
+    QLabel#KpiValue  {{ font-size: 17pt; font-weight: 600; color: {TEXT_PRIMARY}; }}
+    QLabel#KpiValue[est="true"] {{ color: {WARNING}; }}
+    QLabel#KpiSub    {{ font-size: 9pt;  color: {TEXT_SECONDARY}; }}
+    QFrame#SideCard  {{ background: {CARD_BG}; border: 1px solid {BORDER};
+                       border-radius: 8px; }}
+    QLabel#SideCardTitle {{ font-size: 11pt; font-weight: 600;
+                           color: {TEXT_PRIMARY}; }}
+    QLabel#MutedNote {{ font-size: 9pt; color: {TEXT_MUTED}; }}
+    QLabel#WarnNote  {{ font-size: 10pt; color: {WARNING}; }}
+    QTableWidget#ThresholdTable {{ background: transparent; border: none;
+                                  gridline-color: transparent; }}
+    QTableWidget#ThresholdTable::item {{ border-bottom: 1px solid {CARD_BG_ALT};
+                                        padding: 2px 4px; }}
+    QTableWidget#ThresholdTable QHeaderView::section {{
+      background: transparent; color: {TEXT_MUTED}; border: none;
+      border-bottom: 1px solid {BORDER}; padding: 4px; }}
     QToolTip {{
         background-color: {CARD_BG_ALT};
         color: {TEXT_PRIMARY};
@@ -334,3 +358,5 @@ def apply_dark_theme(app: QApplication) -> None:
     pal.setColor(QPalette.ColorRole.HighlightedText, QColor(TEXT_PRIMARY))
     app.setPalette(pal)
     app.setStyleSheet(build_qss())
+
+

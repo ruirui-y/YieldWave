@@ -1,29 +1,6 @@
-"""主窗口：深色主题 + 固定顶栏（Hero 下一动作 + KPI 条）+ 今日操作 Tab（走势图 60% / 右侧合并单表 40%）。
-
-布局架构（修复「卡片垂直堆叠把 Tab 挤没」反模式）：
-- 顶栏（所有 Tab 共享、固定不滚动）：标题+按钮 / Hero 下一动作 banner / KPI 条（官方D/P2·估算·当前点位·M20/M42/M60·有效数据）。
-- 主区 QTabWidget 拿走所有剩余空间（stretch=1）：
-  - Tab1 今日操作：QSplitter 水平 60/40，左走势图(minimumHeight=420)，右合并单表+锚点/信号/仓位块。
-  - Tab2-4：回测/优化、交易记录、数据管理 各自独占整片。
-- 底部 statusBar 常驻免责声明（不再占卡片空间）。
-
-信息合并：原「本周机械交易点位卡 / 今日操作预览买卖线 / 阈值表」三处重复的 A/B/C 买卖线，
-收敛为右侧栏一张 8 列表（仓位|状态|买D/P2|买点|卖D/P2|卖点|距离|动作）。
-「下一动作」只保留 Hero banner 一处。
-
-两种周策略状态：
-- 未锁定（PREVIEW）：只显示预览线，不产生正式 BUY/SELL 信号。
-- 已锁定（LOCKED）：用本周锁定的 A/B/C 阈值产生正式信号。
-
-盘中估算（与正式信号分开显示）：
-- estimated_current_dp2 = anchor_dp2 * anchor_close / current_index_point
-- A/B/C 估算点位 = anchor_close * anchor_dp2 / target_dp2
-- 下一机械动作：根据当前点位 + 仓位状态自动找下一条可执行线
-- 不修改仓位状态，最终仍需用户点击“确认已买入/卖出”
-"""
+"""主窗口：按固定规格重排 YieldWave 主窗口。"""
 
 from __future__ import annotations
-
 import datetime as _dt
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
@@ -186,8 +163,8 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget()
         root = QVBoxLayout(central)
-        root.setContentsMargins(12, 8, 12, 8)
-        root.setSpacing(8)
+        root.setContentsMargins(16, 12, 16, 8)
+        root.setSpacing(10)
         self.setCentralWidget(central)
 
         # 顶行：标题 + 操作按钮（固定）
@@ -200,6 +177,14 @@ class MainWindow(QMainWindow):
         # 主区：Tab 拿走所有剩余空间（走势图不再被挤压）
         self.tabs = QTabWidget()
         self.chart_w = ChartWidget()
+
+        # 隐藏图表控件中的下拉框和特定标签
+        for _combo in self.chart_w.findChildren(QComboBox):
+            _combo.hide()
+        for _label in self.chart_w.findChildren(QLabel):
+            if _label.text() == "时间范围：" or "鼠标移入走势图自动吸附最近交易日" in _label.text():
+                _label.hide()
+
         self.backtest_w = BacktestWidget(self.db, self.config, on_config_changed=self.reload_config)
         self.trade_w = TradeWidget(
             self.db, self.config,
@@ -220,17 +205,20 @@ class MainWindow(QMainWindow):
     def _build_header_row(self) -> QHBoxLayout:
         hdr = QHBoxLayout()
         title = QLabel("YieldWave · 中证红利低波 H30269")
-        title.setObjectName("SectionTitle")
+        title.setObjectName("AppTitle")
         hdr.addWidget(title)
         hdr.addStretch(1)
         self.refresh_btn = QPushButton("刷新当前点位")
         self.refresh_btn.setObjectName("PrimaryButton")
+        self.refresh_btn.setFixedSize(132, 32)
         self.refresh_btn.clicked.connect(self.refresh_current_point_async)
         hdr.addWidget(self.refresh_btn)
         self.manual_btn = QPushButton("手工输入点位")
+        self.manual_btn.setFixedSize(132, 32)
         self.manual_btn.clicked.connect(self.manual_point)
         hdr.addWidget(self.manual_btn)
         self.lock_btn = QPushButton("锁定本周策略")
+        self.lock_btn.setFixedSize(132, 32)
         self.lock_btn.clicked.connect(self.lock_week)
         hdr.addWidget(self.lock_btn)
         return hdr
@@ -239,8 +227,9 @@ class MainWindow(QMainWindow):
         self.hero_banner = QFrame()
         self.hero_banner.setObjectName("HeroBanner")
         self.hero_banner.setProperty("action", "wait")
+        self.hero_banner.setFixedHeight(68)
         hb = QVBoxLayout(self.hero_banner)
-        hb.setContentsMargins(14, 6, 14, 6)
+        hb.setContentsMargins(16, 10, 16, 10)
         hb.setSpacing(2)
         self.hero_title = QLabel("下一动作：--")
         self.hero_title.setObjectName("HeroTitle")
@@ -252,94 +241,163 @@ class MainWindow(QMainWindow):
 
     def _build_kpi_strip(self) -> QFrame:
         self.kpi_frame = QFrame()
-        self.kpi_frame.setObjectName("CardFrame")
-        kv = QVBoxLayout(self.kpi_frame)
-        kv.setContentsMargins(10, 6, 10, 6)
-        kv.setSpacing(4)
-        row1 = QHBoxLayout()
-        row1.setSpacing(18)
-        row2 = QHBoxLayout()
-        row2.setSpacing(18)
-        self.lbl_anchor_date = self._kpi_cell(row1, "官方D/P2日期")
-        self.lbl_anchor_dp2 = self._kpi_cell(row1, "官方D/P2")
-        self.lbl_anchor_close = self._kpi_cell(row1, "锚点收盘")
-        self.lbl_current_point = self._kpi_cell(row1, "当前点位")
-        self.lbl_current_point_time = self._kpi_cell(row1, "更新时间")
-        row1.addStretch(1)
-        self.lock_status_label = QLabel("本周策略状态：--")
-        self.lock_status_label.setObjectName("KpiLabel")
-        row1.addWidget(self.lock_status_label)
-        kv.addLayout(row1)
-        self.lbl_est_dp2 = self._kpi_cell(row2, "估算当前D/P2")
-        self.lbl_m20 = self._kpi_cell(row2, "M20")
-        self.lbl_m42 = self._kpi_cell(row2, "M42")
-        self.lbl_m60 = self._kpi_cell(row2, "M60")
-        self.lbl_valid = self._kpi_cell(row2, "有效数据")
-        row2.addStretch(1)
-        kv.addLayout(row2)
+        self.kpi_frame.setObjectName("KpiStrip")
+        self.kpi_frame.setFixedHeight(78)
+        kv = QHBoxLayout(self.kpi_frame)
+        kv.setContentsMargins(0, 0, 0, 0)
+        kv.setSpacing(0)
+        self.lbl_anchor_dp2, self.sub_anchor_dp2 = self._kpi_cell(kv, "官方 D/P2")
+        self._kpi_vline(kv)
+        self.lbl_est_dp2, self.sub_est_dp2 = self._kpi_cell(kv, "估算当前 D/P2")
+        self.lbl_est_dp2.setProperty("est", True)
+        self._kpi_vline(kv)
+        self.lbl_current_point, self.sub_current_point = self._kpi_cell(kv, "当前点位")
+        self._kpi_vline(kv)
+        self.lbl_anchor_close, self.sub_anchor_close = self._kpi_cell(kv, "锚点收盘")
+        self._kpi_vline(kv)
+        self.lbl_m42, self.sub_m42 = self._kpi_cell(kv, "M42 中位数")
         return self.kpi_frame
 
     def _build_trade_view(self) -> QWidget:
-        """今日操作 Tab：左 60% 走势图，右 40% 合并单表 + 状态块。"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(10)
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.chart_w.setMinimumHeight(420)  # 兜底：杜绝走势图高度≈0
-        splitter.addWidget(self.chart_w)
+        splitter.addWidget(self._build_chart_pane())
         splitter.addWidget(self._build_side_panel())
-        splitter.setStretchFactor(0, 3)  # 60%
-        splitter.setStretchFactor(1, 2)  # 40%
-        splitter.setSizes([840, 560])
-        return splitter
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setSizes([900, 480])
+        layout.addWidget(splitter, 1)
+        return tab
+
+    def _build_chart_pane(self) -> QWidget:
+        pane = QWidget()
+        pv = QVBoxLayout(pane)
+        pv.setContentsMargins(0, 0, 0, 0)
+        pv.setSpacing(6)
+        tools = QHBoxLayout()
+        tools.setContentsMargins(0, 0, 0, 0)
+        tools.setSpacing(8)
+        tools.setSizeConstraint(QHBoxLayout.SizeConstraint.SetFixedSize)
+        label = QLabel("时间范围")
+        label.setObjectName("MutedNote")
+        tools.addWidget(label)
+        self.range_combo = QComboBox()
+        self.range_combo.addItems(["1个月", "2个月", "3个月", "6个月", "1年"])
+        self.range_combo.setCurrentText("6个月")  # 与 chart 内部默认范围对齐，避免初始不一致
+        self.range_combo.setFixedSize(110, 26)
+        tools.addWidget(self.range_combo)
+        self.range_combo.currentTextChanged.connect(self.chart_w.set_range)
+        tools.addStretch(1)
+        hover = QLabel("鼠标移入走势图自动吸附最近交易日")
+        hover.setObjectName("MutedNote")
+        tools.addWidget(hover)
+        pv.addLayout(tools)
+        self.chart_w.setMinimumSize(720, 460)
+        pv.addWidget(self.chart_w, 1)
+        return pane
 
     def _build_side_panel(self) -> QWidget:
-        """右侧栏：合并后的 A/B/C 机械点位单表（无滚动）+ 锚点/信号/仓位信息块。"""
         panel = QWidget()
+        panel.setMinimumWidth(460)
+        panel.setMaximumWidth(500)
         pv = QVBoxLayout(panel)
-        pv.setContentsMargins(8, 8, 8, 8)
-        pv.setSpacing(8)
-
-        self.side_table = QTableWidget()
-        self.side_table.setColumnCount(8)
-        self.side_table.setHorizontalHeaderLabels([
-            "仓位", "状态", "买D/P2", "买点位", "卖D/P2", "卖点位", "距离", "动作",
-        ])
-        self.side_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.side_table.verticalHeader().setVisible(False)
-        self.side_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        pv.addWidget(self.side_table)
-
-        self.anchor_block = QLabel("锚点：--")
-        self.anchor_block.setObjectName("MutedNote")
-        self.anchor_block.setWordWrap(True)
-        pv.addWidget(self.anchor_block)
-
-        self.signal_block = QLabel("今日正式信号：--")
-        self.signal_block.setObjectName("MutedNote")
-        self.signal_block.setWordWrap(True)
-        pv.addWidget(self.signal_block)
-
-        self.position_block = QLabel("仓位：--")
-        self.position_block.setObjectName("MutedNote")
-        self.position_block.setWordWrap(True)
-        pv.addWidget(self.position_block)
-
+        pv.setContentsMargins(0, 0, 0, 0)
+        pv.setSpacing(10)
+        pv.addWidget(self._build_side_card_a())
+        pv.addWidget(self._build_side_card_b())
+        pv.addWidget(self._build_side_card_c())
         pv.addStretch(1)
         return panel
 
-    def _kpi_cell(self, layout, label_text: str) -> QLabel:
-        """在 layout 里放一个 KPI 单元（label + value），返回 value QLabel。"""
+    def _build_side_card(self, title: str, fixed_height: int) -> tuple[QFrame, QVBoxLayout]:
+        card = QFrame()
+        card.setObjectName("SideCard")
+        card.setFixedHeight(fixed_height)
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(6)
+        title_label = QLabel(title)
+        title_label.setObjectName("SideCardTitle")
+        lay.addWidget(title_label)
+        return card, lay
+
+    def _build_side_card_a(self) -> QFrame:
+        card, lay = self._build_side_card("A/B/C 机械点位", 224)
+        self.side_table = QTableWidget()
+        self.side_table.setObjectName("ThresholdTable")
+        self.side_table.setColumnCount(5)
+        self.side_table.setRowCount(3)
+        self.side_table.setHorizontalHeaderLabels(["仓位", "买入线", "卖出线", "距离", "动作"])
+        self.side_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.side_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.side_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.side_table.verticalHeader().setVisible(False)
+        self.side_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.side_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.side_table.setShowGrid(False)
+        self.side_table.horizontalHeader().setFixedHeight(30)
+        self.side_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        for col, width in enumerate([60, 116, 116, 84, 64]):
+            self.side_table.setColumnWidth(col, width)
+        for row in range(3):
+            self.side_table.setRowHeight(row, 46)
+        self.side_table.setFixedHeight(170)
+        lay.addWidget(self.side_table)
+        return card
+
+    def _build_side_card_b(self) -> QFrame:
+        card, lay = self._build_side_card("锚点与数据", 124)
+        self.anchor_block = self._side_note(lay)
+        self.data_source_block = self._side_note(lay)
+        self.valid_data_block = self._side_note(lay)
+        self.position_block = self._side_note(lay)
+        return card
+
+    def _build_side_card_c(self) -> QFrame:
+        card, lay = self._build_side_card("今日正式信号", 96)
+        self.signal_block = QLabel("等待锁定本周策略（未锁定不产生正式 BUY/SELL）")
+        self.signal_block.setObjectName("WarnNote")
+        self.signal_block.setWordWrap(True)
+        self.signal_sub_block = QLabel("锁定后基于官方已公布 D/P2 触发")
+        self.signal_sub_block.setObjectName("MutedNote")
+        self.signal_sub_block.setWordWrap(True)
+        lay.addWidget(self.signal_block)
+        lay.addWidget(self.signal_sub_block)
+        return card
+
+    def _side_note(self, layout: QVBoxLayout) -> QLabel:
+        label = QLabel("--")
+        label.setObjectName("MutedNote")
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        return label
+
+    def _kpi_vline(self, layout: QHBoxLayout) -> None:
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.VLine)
+        line.setFrameShadow(QFrame.Shadow.Plain)
+        layout.addWidget(line)
+
+    def _kpi_cell(self, layout: QHBoxLayout, label_text: str) -> tuple[QLabel, QLabel]:
         cell = QVBoxLayout()
+        cell.setContentsMargins(16, 12, 16, 12)
         cell.setSpacing(2)
         lbl = QLabel(label_text)
         lbl.setObjectName("KpiLabel")
         val = QLabel("--")
         val.setObjectName("KpiValue")
+        sub = QLabel("--")
+        sub.setObjectName("KpiSub")
         cell.addWidget(lbl)
         cell.addWidget(val)
+        cell.addWidget(sub)
         wrapper = QWidget()
         wrapper.setLayout(cell)
         layout.addWidget(wrapper)
-        return val
-
+        return val, sub
     def _init_disclaimer_statusbar(self) -> None:
         self.disclaimer_label = QLabel(
             "核心仓 build_percentile=50/65/80 为待回测确认初值；程序只产生信号，不自动下单。"
@@ -545,276 +603,166 @@ class MainWindow(QMainWindow):
 
     def _update_kpi(self) -> None:
         valid = valid_dp2_count(self.records)
-        n = len(self.records)
-        warm = ""
-        if valid < self.config["primary_window"]:
-            warm = f"  ⚠️ 有效D/P2热身中：{valid} / {self.config['primary_window']} 个交易日"
-        # 官方锚点
-        if self.latest is not None and self.latest.dividend_yield_2 is not None:
-            self.lbl_anchor_date.setText(self.latest.date.isoformat())
-            self.lbl_anchor_dp2.setText(f"{self._fmt(self.latest.dividend_yield_2, 2)}%")
-        else:
-            self.lbl_anchor_date.setText("--")
-            self.lbl_anchor_dp2.setText("--")
-        # anchor_close
-        if self.anchor is not None and self.anchor.close is not None:
-            self.lbl_anchor_close.setText(_fmt_point(self.anchor.close))
-        else:
-            self.lbl_anchor_close.setText("-- (抓取中)")
-        # 当前点位 + 更新时间
-        if self.current_point is not None:
-            self.lbl_current_point.setText(_fmt_point(self.current_point))
-        elif self.current_quote is not None and self.current_quote.current is not None:
-            self.lbl_current_point.setText(_fmt_point(self.current_quote.current))
-        else:
-            self.lbl_current_point.setText("--")
-        if self.current_quote is not None:
-            self.lbl_current_point_time.setText(
-                f"{self.current_quote.trade_date} {self.current_quote.trade_time}"
-            )
-        else:
-            self.lbl_current_point_time.setText("--")
-        # 估算 D/P2 + 中位数
+        total = len(self.records)
+        official_date = self.latest.date.isoformat() if self.latest is not None else "--"
+        self.lbl_anchor_dp2.setText(
+            f"{self._fmt(self.latest.dividend_yield_2, 2)}%"
+            if self.latest is not None and self.latest.dividend_yield_2 is not None else "--"
+        )
+        self.sub_anchor_dp2.setText(f"官方日期 {official_date}")
+
         est_dp2 = estimate_current_dp2(
             self.anchor.dp2 if self.anchor else None,
             self.anchor.close if self.anchor else None,
             self.current_point,
         )
-        if est_dp2 is not None:
-            self.lbl_est_dp2.setText(f"{self._fmt(est_dp2, 3)}%  [估算]")
-            self.lbl_est_dp2.setObjectName("KpiValueEstimate")
-            self.lbl_est_dp2.setToolTip(
-                "根据最近官方 D/P2 及同日指数收盘点位静态折算。"
-                "假设短期分红基数不变，仅用于盘中交易参考。"
-            )
-        else:
-            reason = "缺 anchor / 当前点位"
-            if self.anchor is None or not self.anchor.valid():
-                reason = "缺少官方锚点"
-            elif self.current_point is None or self.current_point <= 0:
-                reason = "缺少当前指数点位"
-            self.lbl_est_dp2.setText(f"-- [估算] ({reason})")
-            self.lbl_est_dp2.setObjectName("KpiValue")
-            self.lbl_est_dp2.setToolTip(
-                "根据最近官方 D/P2 及同日指数收盘点位静态折算。"
-                "缺少锚点或当前点位时无法估算。"
-            )
-        self.lbl_m20.setText(f"{self._fmt(self.medians.get('M20'))}%")
+        self.lbl_est_dp2.setText(f"{self._fmt(est_dp2, 3)}%" if est_dp2 is not None else "--")
+        self.lbl_est_dp2.setProperty("est", True)
+        self.lbl_est_dp2.style().unpolish(self.lbl_est_dp2)
+        self.lbl_est_dp2.style().polish(self.lbl_est_dp2)
+        diff = None
+        if est_dp2 is not None and self.latest is not None and self.latest.dividend_yield_2 is not None:
+            diff = est_dp2 - self.latest.dividend_yield_2
+        self.sub_est_dp2.setText(f"较官方 {_fmt_dist(diff, 3)}pp" if diff is not None else "较官方 --pp")
+
+        self.lbl_current_point.setText(_fmt_point(self.current_point) if self.current_point is not None else "--")
+        update_time = "--"
+        if self.current_quote is not None and self.current_quote.trade_time:
+            update_time = self.current_quote.trade_time
+        self.sub_current_point.setText(f"更新 {update_time}")
+
+        self.lbl_anchor_close.setText(
+            _fmt_point(self.anchor.close) if self.anchor is not None and self.anchor.close is not None else "--"
+        )
+        anchor_date = self.anchor.date if self.anchor is not None else "--"
+        self.sub_anchor_close.setText(f"锚定日 {anchor_date}")
+
         self.lbl_m42.setText(f"{self._fmt(self.medians.get('M42'))}%")
-        self.lbl_m60.setText(f"{self._fmt(self.medians.get('M60'))}%")
-        self.lbl_valid.setText(f"{valid} / 总 {n} 条{warm}")
-        # 本周策略状态
-        if self.locked:
-            self.lock_status_label.setText(
-                f"本周已锁定 · M42={self._fmt(self.weekly.m42, 3)}%"
-            )
-        else:
-            self.lock_status_label.setText("本周未锁定（仅预览，不产生正式信号）")
+        self.sub_m42.setText(f"M20 {self._fmt(self.medians.get('M20'))} · M60 {self._fmt(self.medians.get('M60'))}")
 
     def _set_hero_action(self, action: str) -> None:
-        """切换 Hero banner 左边框语义色（buy 绿 / sell 红 / wait 灰）。"""
         self.hero_banner.setProperty("action", action)
         self.hero_banner.style().unpolish(self.hero_banner)
         self.hero_banner.style().polish(self.hero_banner)
 
     def _hero_sub_hint(self) -> str:
+        suffix = " · [预览·本周未锁定]" if not self.locked else ""
         if self.anchor is None or not self.anchor.valid():
-            return "缺少官方锚点，无法估算下一动作（等待数据抓取）"
+            return f"当前点位 -- · 目标 -- · 距离 -- 点（--%）{suffix}"
         if self.current_point is None or self.current_point <= 0:
-            return "缺少当前指数点位（请刷新行情或手工输入）"
-        return "本周策略未锁定，且无预览线"
+            return f"当前点位 -- · 目标 -- · 距离 -- 点（--%）{suffix}"
+        return f"当前点位 {_fmt_point(self.current_point)} · 目标 -- · 距离 -- 点（--%）{suffix}"
 
     def _update_hero(self) -> None:
-        """Hero banner：下一动作（只保留这一处，按动作着色）。"""
         nxt = self._next_mech_action()
         if nxt is None:
             self.hero_title.setText("下一动作：等待")
             self.hero_sub.setText(self._hero_sub_hint())
             self._set_hero_action("wait")
             return
-        _name, label, target_pt, dist_val, note = nxt
-        self.hero_title.setText(f"下一动作：{label}")
-        cur = f"当前点位 {_fmt_point(self.current_point)}" if self.current_point is not None else ""
-        dist_str = f"距离 {_fmt_dist(dist_val)} 点" if dist_val is not None else ""
-        self.hero_sub.setText(f"{cur} · 目标 {_fmt_point(target_pt)} · {dist_str}  [{note}]")
-        if "买入" in label:
-            self._set_hero_action("buy")
-        elif "卖出" in label:
-            self._set_hero_action("sell")
-        else:
-            self._set_hero_action("wait")
+        p, action, target_pt, dist_pt, dist_pct = nxt
+        verb = "买入" if action == "buy" else "卖出"
+        self.hero_title.setText(f"下一动作：{p.label}{verb} {p.percent:.0f}% · 目标点位 {_fmt_point(target_pt)}")
+        suffix = "[预览·本周未锁定]" if not self.locked else "[本周已锁定]"
+        self.hero_sub.setText(
+            f"当前点位 {_fmt_point(self.current_point)} · 目标 {_fmt_point(target_pt)} · "
+            f"距离 {_fmt_dist(dist_pt)} 点（{_fmt_dist(dist_pct)}%）· {suffix}"
+        )
+        self._set_hero_action(action)
 
-    def _next_mech_action(self) -> Optional[Tuple[str, str, Decimal, Optional[Decimal], str]]:
-        """根据当前点位 + 仓位状态找下一条可执行线。
-
-        返回 (position_name, action_label, target_point, distance, reason) 或 None。
-        - EMPTY 仓位 -> 只看 buy 线（点位越低越接近买）；
-        - HOLDING 仓位 -> 只看 sell 线（点位越高越接近卖）；
-        - 已越过对应点位 -> "已进入 X 区"。
-        """
+    def _next_mech_action(self):
         if self.anchor is None or not self.anchor.valid():
             return None
         if self.current_point is None or self.current_point <= 0:
             return None
-        # 当前活跃阈值：本周锁定优先；未锁定用预览（明确标"预览"）
         use = self.thresholds if self.locked else self.preview_thresholds
         if not use:
             return None
-        # 收集所有候选（点位与目标）
         candidates = []
         for p in self.positions:
             if p.kind == "core":
                 continue
-            if p.status == POS_EMPTY:
-                # 只考虑买入线
-                target_dp2 = use.get(f"{p.name}_buy")
-                if target_dp2 is None:
-                    continue
-                target_pt = yield_to_target_point(
-                    self.anchor.dp2, self.anchor.close, target_dp2
-                )
-                if target_pt is None or target_pt <= 0:
-                    continue
-                candidates.append((p, "买入", target_dp2, target_pt, "buy"))
-            elif p.status == POS_HOLDING:
-                target_dp2 = use.get(f"{p.name}_sell")
-                if target_dp2 is None:
-                    continue
-                target_pt = yield_to_target_point(
-                    self.anchor.dp2, self.anchor.close, target_dp2
-                )
-                if target_pt is None or target_pt <= 0:
-                    continue
-                candidates.append((p, "卖出", target_dp2, target_pt, "sell"))
-        if not candidates:
-            return None
-        # 统一：按 |target_pt - current_point| 最小的候选
-        cur = self.current_point
-        best = min(candidates, key=lambda c: abs(c[3] - cur))
-        p, action, target_dp2, target_pt, kind = best
-        dist = distance_to_target(cur, target_pt)
-        dist_str = (
-            f"{_fmt_dist(dist[0])} 点 / {_fmt_dist(dist[1])}%"
-            if dist else "--"
-        )
-        # 是否已越过
-        crossed = (kind == "buy" and cur <= target_pt) or (kind == "sell" and cur >= target_pt)
-        if crossed:
-            label = f"已进入 {p.label}{action}参考区 · 目标点位 {target_pt.quantize(Decimal('0.01'))}"
-        else:
-            label = f"{p.label}{action} {p.percent:.0f}% · 目标点位 {target_pt.quantize(Decimal('0.01'))}"
-        note = "预览（本周未锁定）" if not self.locked else "本周锁定"
-        return p.name, label, target_pt, dist[0] if dist else None, note
+            key = f"{p.name}_buy" if p.status == POS_EMPTY else f"{p.name}_sell"
+            action = "buy" if p.status == POS_EMPTY else "sell"
+            target_dp2 = use.get(key)
+            target_pt = yield_to_target_point(
+                self.anchor.dp2,
+                self.anchor.close,
+                target_dp2,
+            ) if target_dp2 is not None else None
+            if target_pt is None or target_pt <= 0:
+                continue
+            dist = distance_to_target(self.current_point, target_pt)
+            if dist:
+                candidates.append((p, action, target_pt, dist[0], dist[1]))
+        return min(candidates, key=lambda c: abs(c[3])) if candidates else None
 
     def _update_side_table(self) -> None:
-        """右侧栏合并单表 + 锚点/信号/仓位信息块（替代原三处重复视图）。"""
         use = self.thresholds if self.locked else self.preview_thresholds
         swing = [p for p in self.positions if p.kind != "core"]
-        # 顺序：A -> B -> C
         swing = sorted(swing, key=lambda p: self.config["positions"][p.name].get("percent", 0))
         self.side_table.setRowCount(len(swing))
-        cur_dp2 = self.latest.dividend_yield_2 if self.latest else None
-        est_dp2 = estimate_current_dp2(
-            self.anchor.dp2 if self.anchor else None,
-            self.anchor.close if self.anchor else None,
-            self.current_point,
-        )
         for i, p in enumerate(swing):
-            act, _ = self.signals.get(p.name, (ACT_WAIT, ""))
-            action_text = SIGNAL_LABEL[act] if self.locked else "预览"
-            self.side_table.setItem(i, 0, QTableWidgetItem(f"{p.label} {p.percent:.0f}%"))
-            self.side_table.setItem(i, 1, QTableWidgetItem(p.status))
             buy_dp2 = use.get(f"{p.name}_buy")
+            sell_dp2 = use.get(f"{p.name}_sell")
             buy_pt = yield_to_target_point(
                 self.anchor.dp2 if self.anchor else None,
                 self.anchor.close if self.anchor else None,
                 buy_dp2,
             ) if buy_dp2 is not None else None
-            self.side_table.setItem(i, 2, QTableWidgetItem(f"{self._fmt(buy_dp2, 3)}%"))
-            buy_pt_text = _fmt_point(buy_pt)
-            if not self.locked and buy_pt is not None:
-                buy_pt_text += " [预览]"
-            self.side_table.setItem(i, 3, QTableWidgetItem(buy_pt_text))
-            sell_dp2 = use.get(f"{p.name}_sell")
             sell_pt = yield_to_target_point(
                 self.anchor.dp2 if self.anchor else None,
                 self.anchor.close if self.anchor else None,
                 sell_dp2,
             ) if sell_dp2 is not None else None
-            self.side_table.setItem(i, 4, QTableWidgetItem(f"{self._fmt(sell_dp2, 3)}%"))
-            sell_pt_text = _fmt_point(sell_pt)
-            if not self.locked and sell_pt is not None:
-                sell_pt_text += " [预览]"
-            self.side_table.setItem(i, 5, QTableWidgetItem(sell_pt_text))
-            # 距离：取当前点位最接近的那条线（买或卖）
-            cands = []
-            if buy_pt is not None:
-                d = distance_to_target(self.current_point, buy_pt)
-                if d:
-                    cands.append(d)
-            if sell_pt is not None:
-                d = distance_to_target(self.current_point, sell_pt)
-                if d:
-                    cands.append(d)
-            if cands:
-                best = min(cands, key=lambda d: abs(d[0]))
-                dist_text = f"{_fmt_dist(best[0])} 点 / {_fmt_dist(best[1])}%"
-            else:
-                dist_text = "--"
-            self.side_table.setItem(i, 6, QTableWidgetItem(dist_text))
-            # 动作
-            act_item = QTableWidgetItem(action_text)
-            if self.locked:
-                color_key = SIGNAL_ACTION_CSS[act].replace("Action", "").upper()
-                act_item.setForeground(QColor(getattr(theme, color_key)))
-            else:
-                act_item.setForeground(QColor(theme.TEXT_MUTED))
-            self.side_table.setItem(i, 7, act_item)
-        # 固定高度（无内部滚动）
-        n = self.side_table.rowCount()
-        if n:
-            try:
-                rh = self.side_table.rowHeight(0)
-            except Exception:
-                rh = 28
-            hh = self.side_table.horizontalHeader().height()
-            self.side_table.setFixedHeight(hh + rh * n + 4)
+            dist_text = "--"
+            action_text = "等待买入" if p.status == POS_EMPTY else "持有"
+            action_color = theme.TEXT_MUTED
+            if p.status == POS_EMPTY and buy_pt is not None:
+                dist = distance_to_target(self.current_point, buy_pt)
+                if dist:
+                    dist_text = f"{_fmt_dist(dist[0])} 点"
+                    if dist[0] <= 0:
+                        action_text = "可执行"
+                        action_color = theme.BUY
+            elif p.status == POS_HOLDING and sell_pt is not None:
+                dist = distance_to_target(self.current_point, sell_pt)
+                if dist:
+                    dist_text = f"{_fmt_dist(dist[0])} 点"
+                    if dist[0] >= 0:
+                        action_text = "可执行"
+                        action_color = theme.SELL
+            if not self.locked:
+                action_text = f"{action_text}(预览)"
 
-        # 锚点信息块
+            values = [
+                f"{p.label} {p.percent:.0f}%",
+                f"{self._fmt(buy_dp2, 3)}%\n{_fmt_point(buy_pt)}",
+                f"{self._fmt(sell_dp2, 3)}%\n{_fmt_point(sell_pt)}",
+                dist_text,
+                action_text,
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if col == 4:
+                    item.setForeground(QColor(action_color))
+                self.side_table.setItem(i, col, item)
+            self.side_table.setRowHeight(i, 46)
+
         if self.anchor is not None and self.anchor.valid():
             self.anchor_block.setText(
-                f"锚点：{self.anchor.date} · 官方 D/P2 {self._fmt(self.anchor.dp2, 2)}% · "
-                f"收盘 {_fmt_point(self.anchor.close)}（红利查 + 中证官方）"
+                f"锚点：{self.anchor.date} · 官方 D/P2 {self._fmt(self.anchor.dp2, 2)}% · 收盘 {_fmt_point(self.anchor.close)}"
             )
         else:
-            self.anchor_block.setText("锚点：缺少官方锚点（等待数据抓取）")
-
-        # 今日正式信号 / 盘中估算参考块（替代原 action_box 重复部分）
-        lines: List[str] = []
-        if not self.locked:
-            lines.append("今日正式信号：等待锁定本周策略（未锁定前不产生正式 BUY/SELL）")
-            if est_dp2 is not None:
-                lines.append(
-                    f"盘中估算参考 D/P2：{self._fmt(est_dp2, 3)}%  [估算] · 官方 D/P2：{self._fmt(cur_dp2, 2)}%"
-                )
-            else:
-                lines.append("盘中估算参考：缺少锚点或当前点位，无法估算")
-        else:
-            for p in swing:
-                act, reason = self.signals.get(p.name, (ACT_WAIT, ""))
-                lines.append(f"{p.label} {p.percent:.0f}%：{SIGNAL_LABEL[act]}（{reason}）")
-        if self.quote_error:
-            lines.append(f"⚠️ {self.quote_error}，使用最后一次成功数据。")
-        self.signal_block.setText("\n".join(lines))
-
-        # 仓位块
+            self.anchor_block.setText("锚点：-- · 官方 D/P2 -- · 收盘 --")
+        self.data_source_block.setText("数据源：红利查 + 中证官方")
+        self.valid_data_block.setText(f"有效数据：{valid_dp2_count(self.records)} / {len(self.records)} 条")
         core = current_core_percent(self.positions)
         sw = current_swing_percent(self.positions)
-        eq = current_equity_percent(self.positions)
-        self.position_block.setText(
-            f"当前实际仓位：核心 {core:.0f}%（已建） + 波段 {sw:.0f}%（已持有） = 实际权益 {eq:.0f}%"
-        )
-
+        self.position_block.setText(f"核心仓：{core:.0f}%（已建）· 波段仓：{sw:.0f}%（已持有）")
+        self.signal_block.setText("等待锁定本周策略（未锁定不产生正式 BUY/SELL）")
+        self.signal_sub_block.setText("锁定后基于官方已公布 D/P2 触发")
     # ---------------- 动作 ----------------
     def lock_week(self) -> None:
         m42 = self.medians.get("M42")
@@ -875,3 +823,10 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.fetch_error = f"红利查数据抓取失败：{exc}"
             return 0, self.fetch_error
+
+
+
+
+
+
+

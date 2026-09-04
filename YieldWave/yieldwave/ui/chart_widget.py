@@ -140,6 +140,16 @@ class ChartWidget(QWidget):
         self._weekly_m42 = D(weekly_m42)
         self.redraw()
 
+    def set_range(self, text: str) -> None:
+        """由主窗口自建下拉框驱动；设置内部 combo 文本并主动重绘。
+
+        主动 redraw 而不只依赖 currentTextChanged 信号：Qt 在文本未变时
+        不会发射信号，若首选项与当前一致会导致图不刷新（单一数据源兜底）。
+        """
+        if text in _RANGES:
+            self.range_combo.setCurrentText(text)
+            self.redraw()
+
     def redraw(self) -> None:
         """重画整张图（初始化/切换时间范围时调用；hover 不调用此函数）。"""
         if not self._records:
