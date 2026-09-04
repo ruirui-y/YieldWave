@@ -57,7 +57,17 @@ def build_qss() -> str:
         background-color: {CARD_BG};
         border: 1px solid {BORDER};
         border-radius: 8px;
+        padding: 10px;
     }}
+    QFrame#HeroBanner {{
+        background-color: {CARD_BG};
+        border: 1px solid {BORDER};
+        border-left: 4px solid {WAIT};
+        border-radius: 8px;
+    }}
+    QFrame#HeroBanner[action="buy"]  {{ border-left-color: {BUY}; }}
+    QFrame#HeroBanner[action="sell"] {{ border-left-color: {SELL}; }}
+    QFrame#HeroBanner[action="wait"] {{ border-left-color: {WAIT}; }}
     QLabel {{
         background: transparent;
         color: {TEXT_PRIMARY};
@@ -71,11 +81,18 @@ def build_qss() -> str:
         font-size: 16px;
         font-weight: 600;
     }}
+    QLabel#KpiValueEstimate {{
+        color: {WARNING};
+        font-size: 16px;
+        font-weight: 600;
+    }}
     QLabel#KpiValueEmphasis {{
         color: {TEXT_PRIMARY};
         font-size: 18px;
         font-weight: 700;
     }}
+    QLabel#HeroTitle {{ font-size: 16pt; font-weight: 700; color: {TEXT_PRIMARY}; }}
+    QLabel#HeroSub {{ font-size: 10pt; color: {TEXT_SECONDARY}; }}
     QLabel#EstimateTag {{
         color: {WARNING};
         font-size: 11px;
@@ -128,7 +145,7 @@ def build_qss() -> str:
         color: {TEXT_SECONDARY};
         border: 1px solid {BORDER};
         border-bottom: none;
-        padding: 6px 14px;
+        padding: 6px 16px;
         border-top-left-radius: 4px;
         border-top-right-radius: 4px;
         margin-right: 2px;
