@@ -10,10 +10,15 @@
     "M60": 60
   },
   "core_percent": 60,
+  "core_tranches": {
+    "CORE1": { "label": "核心1", "percent": 20, "build_percentile": 50 },
+    "CORE2": { "label": "核心2", "percent": 20, "build_percentile": 65 },
+    "CORE3": { "label": "核心3", "percent": 20, "build_percentile": 80 }
+  },
   "positions": {
-    "A": { "label": "A仓", "percent": 20, "buy_offset": 0.02, "sell_offset": -0.01 },
+    "A": { "label": "A仓", "percent": 8, "buy_offset": 0.02, "sell_offset": -0.01 },
     "B": { "label": "B仓", "percent": 12, "buy_offset": 0.07, "sell_offset": -0.04 },
-    "C": { "label": "C仓", "percent": 8,  "buy_offset": 0.12, "sell_offset": -0.11 }
+    "C": { "label": "C仓", "percent": 20, "buy_offset": 0.12, "sell_offset": -0.11 }
   },
   "auto_confirm": false,
   "realtime_estimate_mode": false,
@@ -24,5 +29,5 @@
     "max_per_day": 4,
     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
   },
-  "note": "所有红利/PE 数值统一以“百分数”存储（例如 4.77 表示 4.77%）。偏移量 buy_offset/sell_offset 单位为“百分点”（例如 0.02 表示 +0.02 个百分点，即 4.90 -> 4.92）。"
+  "note": "所有红利/PE 数值统一以“百分数”存储（例如 4.77 表示 4.77%）。偏移量 buy_offset/sell_offset 单位为“百分点”（例如 0.02 表示 +0.02 个百分点，即 4.90 -> 4.92）。核心仓拆分为 CORE1/CORE2/CORE3 各 20%，建仓分位 build_percentile（50/65/80）为“待进一步回测确认”的初值，UI 会明确标注，非已验证最优参数。"
 }

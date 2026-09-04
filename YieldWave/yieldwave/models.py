@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import datetime as _dt
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Optional
+
+from .precision import D
 
 
 def _to_date(value) -> _dt.date:
@@ -30,11 +33,11 @@ class ValuationRecord:
     date: _dt.date
     index_code: str
     index_name: str
-    dividend_yield_1: Optional[float] = None
-    dividend_yield_2: Optional[float] = None
-    pe_1: Optional[float] = None
-    pe_2: Optional[float] = None
-    close: Optional[float] = None
+    dividend_yield_1: Optional[Decimal] = None
+    dividend_yield_2: Optional[Decimal] = None
+    pe_1: Optional[Decimal] = None
+    pe_2: Optional[Decimal] = None
+    close: Optional[Decimal] = None
     source: str = "honglicha"
     fetched_at: Optional[str] = None
 
@@ -44,11 +47,11 @@ class ValuationRecord:
             date=_to_date(row["date"]),
             index_code=row["index_code"],
             index_name=row["index_name"],
-            dividend_yield_1=row.get("dividend_yield_1"),
-            dividend_yield_2=row.get("dividend_yield_2"),
-            pe_1=row.get("pe_1"),
-            pe_2=row.get("pe_2"),
-            close=row.get("close"),
+            dividend_yield_1=D(row.get("dividend_yield_1")),
+            dividend_yield_2=D(row.get("dividend_yield_2")),
+            pe_1=D(row.get("pe_1")),
+            pe_2=D(row.get("pe_2")),
+            close=D(row.get("close")),
             source=row.get("source", "honglicha"),
             fetched_at=row.get("fetched_at"),
         )
@@ -75,16 +78,19 @@ POS_HOLDING = "HOLDING"
 
 @dataclass
 class PositionState:
-    name: str  # "A" / "B" / "C"
-    label: str  # "A仓"
-    percent: float  # 占总资金百分比，例如 20
+    name: str  # "A" / "B" / "C" / "CORE1" / "CORE2" / "CORE3"
+    label: str  # "A仓" / "核心1"
+    percent: Decimal  # 占总资金百分比，例如 20（Decimal，保留完整精度）
     status: str = POS_EMPTY
+    kind: str = "swing"  # "swing" 波段仓（有自动信号） / "core" 核心仓（仅手动建仓）
     buy_date: Optional[str] = None
-    buy_yield: Optional[float] = None
+    buy_yield: Optional[Decimal] = None
     buy_close: Optional[float] = None
     buy_price: Optional[float] = None  # ETF 实际成交价（手工录入）
+    amount: Optional[float] = None  # 实际投入金额（手工录入）
+    note: Optional[str] = None
     sell_date: Optional[str] = None
-    sell_yield: Optional[float] = None
+    sell_yield: Optional[Decimal] = None
     sell_price: Optional[float] = None
 
     @staticmethod
@@ -92,14 +98,17 @@ class PositionState:
         return PositionState(
             name=row["name"],
             label=row.get("label", row["name"]),
-            percent=float(row.get("percent", 0)),
+            percent=D(row.get("percent", 0)),
             status=row.get("status", POS_EMPTY),
+            kind=row.get("kind", "core" if str(row["name"]).startswith("CORE") else "swing"),
             buy_date=row.get("buy_date"),
-            buy_yield=row.get("buy_yield"),
+            buy_yield=D(row.get("buy_yield")),
             buy_close=row.get("buy_close"),
             buy_price=row.get("buy_price"),
+            amount=row.get("amount"),
+            note=row.get("note"),
             sell_date=row.get("sell_date"),
-            sell_yield=row.get("sell_yield"),
+            sell_yield=D(row.get("sell_yield")),
             sell_price=row.get("sell_price"),
         )
 
@@ -108,13 +117,13 @@ class PositionState:
 class WeeklyStrategy:
     week_id: str
     start_date: str
-    m42: float
-    a_buy: float
-    a_sell: float
-    b_buy: float
-    b_sell: float
-    c_buy: float
-    c_sell: float
+    m42: Decimal
+    a_buy: Decimal
+    a_sell: Decimal
+    b_buy: Decimal
+    b_sell: Decimal
+    c_buy: Decimal
+    c_sell: Decimal
     created_at: Optional[str] = None
 
 
@@ -123,14 +132,15 @@ class Trade:
     id: Optional[int]
     position_name: str
     action: str  # "BUY" / "SELL"
-    signal_date: str
-    execution_date: str
-    dividend_yield: Optional[float]
-    m42: Optional[float]
-    threshold: Optional[float]
-    percentage: Optional[float]
-    etf_price: Optional[float]
-    shares: Optional[float]
-    amount: Optional[float]
-    note: Optional[str]
+    signal_date: str  # 信号生成/记录日期（通常 = 执行日期，用于审计）
+    execution_date: str  # 实际成交日期（用户确认成交当天）
+    signal_data_date: Optional[str] = None  # 产生信号所依据的官方估值日期（dividend_yield_2 数据日期）
+    dividend_yield: Optional[Decimal] = None
+    m42: Optional[Decimal] = None  # 产生信号时的“本周锁定 M42”
+    threshold: Optional[Decimal] = None  # 产生信号时的“本周锁定”买卖线
+    percentage: Optional[Decimal] = None
+    etf_price: Optional[float] = None
+    shares: Optional[float] = None
+    amount: Optional[float] = None
+    note: Optional[str] = None
     created_at: Optional[str] = None

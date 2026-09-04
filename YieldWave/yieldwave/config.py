@@ -25,10 +25,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "primary_window": 42,
     "windows": {"M20": 20, "M42": 42, "M60": 60},
     "core_percent": 60,
+    "core_tranches": {
+        "CORE1": {"label": "核心1", "percent": 20, "build_percentile": 50},
+        "CORE2": {"label": "核心2", "percent": 20, "build_percentile": 65},
+        "CORE3": {"label": "核心3", "percent": 20, "build_percentile": 80},
+    },
     "positions": {
-        "A": {"label": "A仓", "percent": 20, "buy_offset": 0.02, "sell_offset": -0.01},
+        "A": {"label": "A仓", "percent": 8, "buy_offset": 0.02, "sell_offset": -0.01},
         "B": {"label": "B仓", "percent": 12, "buy_offset": 0.07, "sell_offset": -0.04},
-        "C": {"label": "C仓", "percent": 8, "buy_offset": 0.12, "sell_offset": -0.11},
+        "C": {"label": "C仓", "percent": 20, "buy_offset": 0.12, "sell_offset": -0.11},
     },
     "auto_confirm": False,
     "realtime_estimate_mode": False,
