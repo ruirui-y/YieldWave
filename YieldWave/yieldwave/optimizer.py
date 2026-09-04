@@ -64,7 +64,7 @@ def search_parameters(
                     "B": (round(ab + B_DELTA_BUY, 2), round(as_ + B_DELTA_SELL, 2)),
                     "C": (round(ab + C_DELTA_BUY, 2), round(as_ + C_DELTA_SELL, 2)),
                 }
-                rounds = _rounds_from_records(records, w, offsets)
+                rounds = _rounds_from_records(records, offsets, w)
                 a_rounds = rounds["A"]
                 a_count = len(a_rounds)
                 annual_a = a_count / years_span if years_span > 0 else 0
