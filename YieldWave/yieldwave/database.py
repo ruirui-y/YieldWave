@@ -17,7 +17,14 @@ import csv
 import datetime as _dt
 import os
 import sqlite3
+from decimal import Decimal
 from typing import List, Optional
+
+from .precision import D
+
+# Decimal -> float：SQLite REAL 列无法直接绑定 Decimal，统一在写入边界转 float（保留 ~15 位有效数字）。
+# 读回时由 models.from_row / 下方 D() 统一还原为 Decimal，保证显示与比较精度。
+sqlite3.register_adapter(Decimal, float)
 
 from .config import DB_PATH, ensure_dirs
 from .models import (
@@ -125,10 +132,39 @@ class Database:
             )
             """
         )
+        # 安全迁移：为已存在的库补充新列（不影响已有数据）
+        try:
+            self.conn.execute("ALTER TABLE positions ADD COLUMN kind TEXT DEFAULT 'swing'")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE positions ADD COLUMN amount REAL")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE positions ADD COLUMN note TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE trades ADD COLUMN signal_data_date TEXT")
+        except sqlite3.OperationalError:
+            pass
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fetch_log (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                source         TEXT,
+                fetch_time     TEXT,
+                success        INTEGER,
+                latest_data_date TEXT,
+                records_count  INTEGER
+            )
+            """
+        )
         self.conn.commit()
 
     # ---------- valuation ----------
-    def upsert_valuation(self, rec: ValuationRecord) -> None:
+    def upsert_valuation(self, rec: ValuationRecord, commit: bool = True) -> None:
         """按 date UPSERT：已存在的日期更新，新的日期插入。"""
         row = rec.to_row()
         row["fetched_at"] = rec.fetched_at or _now()
@@ -152,14 +188,20 @@ class Database:
             """,
             row,
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     def upsert_many(self, recs: List[ValuationRecord]) -> int:
-        n = 0
-        for r in recs:
-            self.upsert_valuation(r)
-            n += 1
-        return n
+        """批量 UPSERT：单事务 + 一次提交。任一条失败整体回滚，绝不出现半批更新。"""
+        self.conn.execute("BEGIN")
+        try:
+            for r in recs:
+                self.upsert_valuation(r, commit=False)
+            self.conn.commit()
+            return len(recs)
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def get_all_valuations(self, ascending: bool = True) -> List[ValuationRecord]:
         order = "ASC" if ascending else "DESC"
@@ -239,7 +281,34 @@ class Database:
         return gaps
 
     # ---------- weekly strategy ----------
-    def save_weekly_strategy(self, ws: WeeklyStrategy) -> None:
+    def save_weekly_strategy(self, ws: WeeklyStrategy, force: bool = False) -> bool:
+        """保存周度锁定策略。
+
+        - force=False（默认，普通 UI）：若 week_id 已存在则**禁止覆盖**（INSERT OR IGNORE），
+          返回 False 表示本周已锁定、未改动。
+        - force=True（仅开发/维护模式）：允许覆盖原策略。
+        返回 True 表示本次写入生效（新增或强制覆盖）。
+        """
+        params = {
+            "week_id": ws.week_id,
+            "start_date": ws.start_date,
+            "M42": ws.m42,
+            "A_buy": ws.a_buy, "A_sell": ws.a_sell,
+            "B_buy": ws.b_buy, "B_sell": ws.b_sell,
+            "C_buy": ws.c_buy, "C_sell": ws.c_sell,
+            "created_at": ws.created_at or _now(),
+        }
+        if not force:
+            cur = self.conn.execute(
+                """
+                INSERT OR IGNORE INTO weekly_strategy
+                    (week_id, start_date, M42, A_buy, A_sell, B_buy, B_sell, C_buy, C_sell, created_at)
+                VALUES (:week_id, :start_date, :M42, :A_buy, :A_sell, :B_buy, :B_sell, :C_buy, :C_sell, :created_at)
+                """,
+                params,
+            )
+            self.conn.commit()
+            return cur.rowcount > 0
         self.conn.execute(
             """
             INSERT INTO weekly_strategy
@@ -253,17 +322,10 @@ class Database:
                 C_buy=excluded.C_buy, C_sell=excluded.C_sell,
                 created_at=excluded.created_at
             """,
-            {
-                "week_id": ws.week_id,
-                "start_date": ws.start_date,
-                "M42": ws.m42,
-                "A_buy": ws.a_buy, "A_sell": ws.a_sell,
-                "B_buy": ws.b_buy, "B_sell": ws.b_sell,
-                "C_buy": ws.c_buy, "C_sell": ws.c_sell,
-                "created_at": ws.created_at or _now(),
-            },
+            params,
         )
         self.conn.commit()
+        return True
 
     def get_weekly_strategy(self, week_id: str) -> Optional[WeeklyStrategy]:
         row = self.conn.execute(
@@ -273,25 +335,70 @@ class Database:
             return None
         r = dict(row)
         return WeeklyStrategy(
-            week_id=r["week_id"], start_date=r["start_date"], m42=r["M42"],
-            a_buy=r["A_buy"], a_sell=r["A_sell"], b_buy=r["B_buy"], b_sell=r["B_sell"],
-            c_buy=r["C_buy"], c_sell=r["C_sell"], created_at=r.get("created_at"),
+            week_id=r["week_id"], start_date=r["start_date"], m42=D(r["M42"]),
+            a_buy=D(r["A_buy"]), a_sell=D(r["A_sell"]), b_buy=D(r["B_buy"]), b_sell=D(r["B_sell"]),
+            c_buy=D(r["C_buy"]), c_sell=D(r["C_sell"]), created_at=r.get("created_at"),
         )
 
     # ---------- positions ----------
-    def ensure_positions(self, config_positions: dict) -> None:
-        """初始化 positions 表（若没有该 name 则插入默认值）。"""
-        for name, p in config_positions.items():
-            self.conn.execute(
-                """
-                INSERT OR IGNORE INTO positions
-                    (name, label, percent, status, buy_date, buy_yield, buy_close,
-                     buy_price, sell_date, sell_yield, sell_price)
-                VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
-                """,
-                (name, p.get("label", name), float(p["percent"]), POS_EMPTY),
-            )
-        self.conn.commit()
+    @staticmethod
+    def _all_position_specs(config: dict) -> "dict":
+        """把 config 中的 swing(positions) 与 core(core_tranches) 合并为统一的仓位规格。"""
+        specs: dict = {}
+        for name, p in config.get("positions", {}).items():
+            specs[name] = {
+                "label": p.get("label", name),
+                "percent": float(p["percent"]),
+                "kind": "swing",
+            }
+        for name, p in config.get("core_tranches", {}).items():
+            specs[name] = {
+                "label": p.get("label", name),
+                "percent": float(p["percent"]),
+                "kind": "core",
+            }
+        return specs
+
+    def ensure_positions(self, config: dict) -> None:
+        """安全初始化/迁移 positions 表。
+
+        - 已有 name：仅 UPDATE label / percent / kind（保留 status、买卖日期、成交价、历史）。
+        - 新 name（如 CORE1/CORE2/CORE3）：INSERT EMPTY。
+        全程单事务，绝不破坏已有 EMPTY/HOLDING 状态与历史成交记录。
+
+        入参兼容两种写法：
+        - 完整配置 {"positions": {...}, "core_tranches": {...}}（UI / 迁移用）
+        - 仅 positions 映射 {"A": {...}, "B": {...}}（旧测试 / 旧调用兼容）
+        """
+        if "positions" not in config and "core_tranches" not in config:
+            # 兼容旧调用：直接把整个 dict 当作 positions 映射
+            config = {"positions": config, "core_tranches": {}}
+        specs = self._all_position_specs(config)
+        self.conn.execute("BEGIN")
+        try:
+            for name, s in specs.items():
+                row = self.conn.execute(
+                    "SELECT name FROM positions WHERE name=?", (name,)
+                ).fetchone()
+                if row:
+                    self.conn.execute(
+                        "UPDATE positions SET label=?, percent=?, kind=? WHERE name=?",
+                        (s["label"], s["percent"], s["kind"], name),
+                    )
+                else:
+                    self.conn.execute(
+                        """
+                        INSERT INTO positions
+                            (name, label, percent, kind, status, buy_date, buy_yield,
+                             buy_close, buy_price, amount, note, sell_date, sell_yield, sell_price)
+                        VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+                        """,
+                        (name, s["label"], s["percent"], s["kind"], POS_EMPTY),
+                    )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def get_positions(self) -> List[PositionState]:
         rows = self.conn.execute("SELECT * FROM positions ORDER BY name").fetchall()
@@ -305,22 +412,24 @@ class Database:
         self.conn.execute(
             """
             INSERT INTO positions
-                (name, label, percent, status, buy_date, buy_yield, buy_close,
-                 buy_price, sell_date, sell_yield, sell_price)
-            VALUES (:name, :label, :percent, :status, :buy_date, :buy_yield, :buy_close,
-                    :buy_price, :sell_date, :sell_yield, :sell_price)
+                (name, label, percent, kind, status, buy_date, buy_yield, buy_close,
+                 buy_price, amount, note, sell_date, sell_yield, sell_price)
+            VALUES (:name, :label, :percent, :kind, :status, :buy_date, :buy_yield, :buy_close,
+                    :buy_price, :amount, :note, :sell_date, :sell_yield, :sell_price)
             ON CONFLICT(name) DO UPDATE SET
-                label=excluded.label, percent=excluded.percent, status=excluded.status,
+                label=excluded.label, percent=excluded.percent, kind=excluded.kind,
+                status=excluded.status,
                 buy_date=excluded.buy_date, buy_yield=excluded.buy_yield,
                 buy_close=excluded.buy_close, buy_price=excluded.buy_price,
+                amount=excluded.amount, note=excluded.note,
                 sell_date=excluded.sell_date, sell_yield=excluded.sell_yield,
                 sell_price=excluded.sell_price
             """,
             {
-                "name": ps.name, "label": ps.label, "percent": ps.percent,
+                "name": ps.name, "label": ps.label, "percent": ps.percent, "kind": ps.kind,
                 "status": ps.status, "buy_date": ps.buy_date, "buy_yield": ps.buy_yield,
-                "buy_close": ps.buy_close, "buy_price": ps.buy_price,
-                "sell_date": ps.sell_date, "sell_yield": ps.sell_yield,
+                "buy_close": ps.buy_close, "buy_price": ps.buy_price, "amount": ps.amount,
+                "note": ps.note, "sell_date": ps.sell_date, "sell_yield": ps.sell_yield,
                 "sell_price": ps.sell_price,
             },
         )
@@ -331,14 +440,15 @@ class Database:
         cur = self.conn.execute(
             """
             INSERT INTO trades
-                (position_name, action, signal_date, execution_date, dividend_yield,
-                 M42, threshold, percentage, etf_price, shares, amount, note, created_at)
-            VALUES (:position_name, :action, :signal_date, :execution_date, :dividend_yield,
-                    :M42, :threshold, :percentage, :etf_price, :shares, :amount, :note, :created_at)
+                (position_name, action, signal_date, execution_date, signal_data_date,
+                 dividend_yield, M42, threshold, percentage, etf_price, shares, amount, note, created_at)
+            VALUES (:position_name, :action, :signal_date, :execution_date, :signal_data_date,
+                    :dividend_yield, :M42, :threshold, :percentage, :etf_price, :shares, :amount, :note, :created_at)
             """,
             {
                 "position_name": t.position_name, "action": t.action,
                 "signal_date": t.signal_date, "execution_date": t.execution_date,
+                "signal_data_date": t.signal_data_date,
                 "dividend_yield": t.dividend_yield, "M42": t.m42, "threshold": t.threshold,
                 "percentage": t.percentage, "etf_price": t.etf_price, "shares": t.shares,
                 "amount": t.amount, "note": t.note, "created_at": t.created_at or _now(),
@@ -361,8 +471,9 @@ class Database:
             out.append(Trade(
                 id=d["id"], position_name=d["position_name"], action=d["action"],
                 signal_date=d["signal_date"], execution_date=d["execution_date"],
-                dividend_yield=d.get("dividend_yield"), m42=d.get("M42"),
-                threshold=d.get("threshold"), percentage=d.get("percentage"),
+                signal_data_date=d.get("signal_data_date"),
+                dividend_yield=D(d.get("dividend_yield")), m42=D(d.get("M42")),
+                threshold=D(d.get("threshold")), percentage=D(d.get("percentage")),
                 etf_price=d.get("etf_price"), shares=d.get("shares"), amount=d.get("amount"),
                 note=d.get("note"), created_at=d.get("created_at"),
             ))
@@ -399,11 +510,11 @@ class Database:
                     date=_to_date(row["date"]),
                     index_code=row.get("index_code", ""),
                     index_name=row.get("index_name", ""),
-                    dividend_yield_1=_f(row.get("dividend_yield_1")),
-                    dividend_yield_2=_f(row.get("dividend_yield_2")),
-                    pe_1=_f(row.get("pe_1")),
-                    pe_2=_f(row.get("pe_2")),
-                    close=_f(row.get("close")),
+                    dividend_yield_1=D(row.get("dividend_yield_1")),
+                    dividend_yield_2=D(row.get("dividend_yield_2")),
+                    pe_1=D(row.get("pe_1")),
+                    pe_2=D(row.get("pe_2")),
+                    close=D(row.get("close")),
                     source=row.get("source", "import"),
                     fetched_at=row.get("fetched_at"),
                 )
@@ -415,11 +526,58 @@ class Database:
         self.conn.close()
 
     def backup(self, dest: Optional[str] = None) -> str:
-        """复制整个数据库文件作为备份。返回备份路径。"""
-        import shutil
+        """生成一致性备份。使用 sqlite3.Connection.backup() 把整个数据库（含 WAL 中
+        尚未 checkpoint 的事务）原子地拷贝到目标文件，避免 shutil.copyfile 漏掉 WAL 数据。
 
+        返回备份路径。
+        """
         if dest is None:
             ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
             dest = self.db_path + f".bak_{ts}"
-        shutil.copyfile(self.db_path, dest)
+        # 先把 WAL 合并进主库，确保备份起点一致
+        self.conn.execute("PRAGMA wal_checkpoint(FULL);")
+        src = sqlite3.connect(self.db_path)
+        try:
+            src.backup(sqlite3.connect(dest))
+        finally:
+            src.close()
         return dest
+
+    def restore(self, path: str) -> None:
+        """从备份文件恢复：用备份覆盖当前库（含结构）。调用方需自行确认。"""
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        self.conn.execute("PRAGMA wal_checkpoint(FULL);")
+        src = sqlite3.connect(path)
+        try:
+            src.backup(self.conn)
+        finally:
+            src.close()
+        self.conn.commit()
+
+    # ---------- fetch_log（每日抓取次数控制） ----------
+    def log_fetch(
+        self, source: str, success: bool, latest_data_date: Optional[str], records_count: int
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO fetch_log (source, fetch_time, success, latest_data_date, records_count)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (source, _now(), 1 if success else 0, latest_data_date, records_count),
+        )
+        self.conn.commit()
+
+    def fetch_count_today(self, source: str) -> int:
+        today = _dt.date.today().isoformat()
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM fetch_log WHERE source=? AND fetch_time LIKE ?",
+            (source, today + "%"),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def last_fetch_success(self, source: str) -> Optional[bool]:
+        row = self.conn.execute(
+            "SELECT success FROM fetch_log WHERE source=? ORDER BY id DESC LIMIT 1", (source,)
+        ).fetchone()
+        return bool(row[0]) if row else None
