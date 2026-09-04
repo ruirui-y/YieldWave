@@ -1,0 +1,22 @@
+# 字节码 / 虚拟环境 / IDE
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.idea/
+.vscode/
+
+# 运行时数据库（首次启动自动重建，不纳入版本控制）
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# 导出产物
+exports/*
+
+# 工具内部记忆（非项目交付物）
+.workbuddy/
+
+# 系统文件
+.DS_Store
+Thumbs.db

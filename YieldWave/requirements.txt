@@ -1,0 +1,7 @@
+PyQt6>=6.4
+requests>=2.28
+beautifulsoup4>=4.11
+pandas>=1.5
+numpy>=1.23
+matplotlib>=3.6
+# 可选备用数据源（中证/AKShare 校验用，非必需）：akshare
