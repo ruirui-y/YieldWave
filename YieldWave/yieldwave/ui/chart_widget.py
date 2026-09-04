@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..models import ValuationRecord
+from ..precision import D
 from ..strategy import compute_thresholds, rolling_median
 
 _RANGES = {
@@ -75,7 +76,7 @@ class ChartWidget(QWidget):
     def set_data(
         self,
         records: List[ValuationRecord],
-        thresholds: Dict[str, float],
+        thresholds: Dict[str, object],
         weekly_m42: Optional[float] = None,
     ) -> None:
         self._records = records
@@ -89,7 +90,7 @@ class ChartWidget(QWidget):
         days = _RANGES[self.range_combo.currentText()]
         recs = self._records[-days:] if days < len(self._records) else self._records
         dates = [r.date for r in recs]
-        dy2 = [r.dividend_yield_2 for r in recs]
+        dy2 = [float(r.dividend_yield_2) if r.dividend_yield_2 is not None else None for r in recs]
 
         self.figure.clear()
         ax = self.figure.add_subplot(111)
@@ -101,7 +102,7 @@ class ChartWidget(QWidget):
             if self._records[i].dividend_yield_2 is None:
                 m42_series.append(None)
                 continue
-            m42_series.append(rolling_median(vals[: i + 1], 42))
+            m42_series.append(float(rolling_median(vals[: i + 1], 42)))
         m42_visible = m42_series[-len(recs):]
         ax.plot(dates, m42_visible, label="M42 (42日中位数)", color="#555555", linestyle="--", linewidth=1.2)
 
@@ -113,7 +114,7 @@ class ChartWidget(QWidget):
         }
         for key, col in colors.items():
             if key in self._thresholds:
-                ax.axhline(self._thresholds[key], color=col, linestyle=":", linewidth=1.0,
+                ax.axhline(float(D(self._thresholds[key])), color=col, linestyle=":", linewidth=1.0,
                            label=key.replace("_", " "))
 
         ax.set_title("中证红利低波 H30269 · 股息率2 历史走势")

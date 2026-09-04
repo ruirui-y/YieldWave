@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
 from ..config import EXPORTS_DIR, get_user_agent
 from ..database import Database
 from ..models import ValuationRecord
+from ..precision import D, fmt_yield
 
 
 class _EditRowDialog(QDialog):
@@ -120,32 +121,87 @@ class DataWidget(QWidget):
         c = self.db.count()
         e = self.db.earliest_date()
         l = self.db.latest_date()
-        self.stats.setText(f"总条数：{c}    最早日期：{e}    最新日期：{l}")
+        from ..strategy import valid_dp2_count
+        valid = valid_dp2_count(self.db.get_all_valuations())
+        self.stats.setText(
+            f"总条数：{c}    有效D/P2：{valid} 条    最早日期：{e}    最新日期：{l}\n"
+            f"今日已抓取：{self.db.fetch_count_today(self.config.get('source','honglicha'))} 次"
+            f"（上限 {self.config.get('update',{}).get('max_per_day',4)} 次/天）"
+        )
         rows = self.db.get_all_valuations()
         self.table.setRowCount(min(len(rows), 2000))
         for i, r in enumerate(rows[-2000:]):
             self.table.setItem(i, 0, QTableWidgetItem(r.date.isoformat()))
             self.table.setItem(i, 1, QTableWidgetItem(r.index_code))
             self.table.setItem(i, 2, QTableWidgetItem(r.index_name))
-            self.table.setItem(i, 3, QTableWidgetItem(f"{r.dividend_yield_1:.2f}" if r.dividend_yield_1 is not None else "-"))
-            self.table.setItem(i, 4, QTableWidgetItem(f"{r.dividend_yield_2:.2f}" if r.dividend_yield_2 is not None else "-"))
-            self.table.setItem(i, 5, QTableWidgetItem(f"{r.pe_1:.2f}" if r.pe_1 is not None else "-"))
-            self.table.setItem(i, 6, QTableWidgetItem(f"{r.pe_2:.2f}" if r.pe_2 is not None else "-"))
-            self.table.setItem(i, 7, QTableWidgetItem(f"{r.close:.2f}" if r.close is not None else "-"))
+            self.table.setItem(i, 3, QTableWidgetItem(fmt_yield(r.dividend_yield_1, 2) if r.dividend_yield_1 is not None else "-"))
+            self.table.setItem(i, 4, QTableWidgetItem(fmt_yield(r.dividend_yield_2, 2) if r.dividend_yield_2 is not None else "-"))
+            self.table.setItem(i, 5, QTableWidgetItem(fmt_yield(r.pe_1, 2) if r.pe_1 is not None else "-"))
+            self.table.setItem(i, 6, QTableWidgetItem(fmt_yield(r.pe_2, 2) if r.pe_2 is not None else "-"))
+            self.table.setItem(i, 7, QTableWidgetItem(fmt_yield(r.close, 2) if r.close is not None else "-"))
             self.table.setItem(i, 8, QTableWidgetItem(r.source))
 
     def update_now(self) -> None:
         if self.on_update is None:
             self.status.setText("更新函数未注入。")
             return
+        source = self.config.get("source", "honglicha")
+        max_per_day = self.config.get("update", {}).get("max_per_day", 4)
+        today_count = self.db.fetch_count_today(source)
+        if today_count >= max_per_day:
+            reply = QMessageBox.question(
+                self, "已达每日上限",
+                f"今日已抓取 {today_count} 次（上限 {max_per_day} 次）。\n"
+                f"仍要强制刷新？（会再次占用一次抓取额度并请求网络）",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                self.status.setText(f"已取消：今日抓取已达上限 {max_per_day} 次。")
+                return
         count, err = self.on_update()
+        latest = self.db.latest_date()
+        self.db.log_fetch(source, err is None, latest, count if err is None else 0)
         if err:
             self.status.setText(f"⚠️ {err}")
         else:
             self.status.setText(f"✅ 已更新，新增/更新 {count} 条。")
+            self._verify_csindex(latest)
         self.refresh_stats()
         if self.on_changed:
             self.on_changed()
+
+    def _verify_csindex(self, latest_date: Optional[str]) -> None:
+        """若启用中证/AKShare 校验，则对比最近共同日期的 D/P2；绝不写入主历史。"""
+        if not self.config.get("csindex_enabled"):
+            return
+        try:
+            from ..data_sources import csindex
+            ak_recs, err = csindex.fetch_csindex_dp2(self.config.get("index_code", "H30269"))
+        except Exception as exc:  # 未安装 akshare 等
+            self.status.setText(self.status.text() + f"\n备用源不可用：{exc}")
+            return
+        if err:
+            self.status.setText(self.status.text() + f"\n备用源不可用：{err}")
+            return
+        tol = float(self.config.get("csindex_verify_tolerance", 0.02))
+        ak_map = dict(ak_recs)
+        hong = {r.date.isoformat(): r.dividend_yield_2 for r in self.db.get_all_valuations()}
+        common = [d for d in ak_map if d in hong]
+        if not common:
+            self.status.setText(self.status.text() + "\n校验：无共同日期，无法比对。")
+            return
+        d = common[-1]
+        diff = abs(D(hong[d]) - D(ak_map[d]))
+        if diff <= tol:
+            self.status.setText(
+                self.status.text()
+                + f"\n数据校验正常（{d}：红利查 {hong[d]} vs 中证 {ak_map[d]}，差 {diff:.2f}）"
+            )
+        else:
+            self.status.setText(
+                self.status.text()
+                + f"\n⚠️ 两个数据源存在差异（{d}：红利查 {hong[d]} vs 中证 {ak_map[d]}，差 {diff:.2f}），请人工核对。"
+            )
 
     def export_csv(self) -> None:
         import os
@@ -201,11 +257,11 @@ class DataWidget(QWidget):
             date=date_str,
             index_code=self.config.get("index_code", "H30269"),
             index_name=self.config.get("index_name", ""),
-            dividend_yield_1=dlg.dy1.value() or None,
-            dividend_yield_2=dlg.dy2.value() or None,
-            pe_1=dlg.pe1.value() or None,
-            pe_2=dlg.pe2.value() or None,
-            close=dlg.close.value() or None,
+            dividend_yield_1=D(dlg.dy1.value()) if dlg.dy1.value() else None,
+            dividend_yield_2=D(dlg.dy2.value()) if dlg.dy2.value() else None,
+            pe_1=D(dlg.pe1.value()) if dlg.pe1.value() else None,
+            pe_2=D(dlg.pe2.value()) if dlg.pe2.value() else None,
+            close=D(dlg.close.value()) if dlg.close.value() else None,
             source="manual",
         )
         self.db.upsert_valuation(rec)

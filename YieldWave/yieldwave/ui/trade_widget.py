@@ -1,6 +1,12 @@
 """交易记录页面：确认买卖、仓位状态、成交明细。
 
 程序只产生信号，不自动下单。用户根据信号点击“确认已买入 / 确认已卖出”后才改变仓位状态。
+
+审计一致性：
+- 成交记录保存的是“产生信号时的本周锁定 M42 与锁定阈值”，绝不重新计算实时 M42。
+- signal_data_date = 产生信号所依据的官方估值日期（dividend_yield_2 数据日期）。
+- execution_date = 用户实际成交日期（今天）。
+- 本周未锁定时，禁止任何成交确认（不产生正式信号）。
 """
 
 from __future__ import annotations
@@ -26,7 +32,9 @@ from PyQt6.QtWidgets import (
 
 from ..database import Database
 from ..models import POS_EMPTY, POS_HOLDING, Trade, ValuationRecord
-from ..strategy import ACT_BUY, ACT_SELL
+from ..precision import fmt_yield
+from ..strategy import ACT_BUY, ACT_SELL, thresholds_from_weekly
+from ..strategy import current_week_id
 
 SIGNAL_NAMES = {"BUY": "买入", "SELL": "卖出", "HOLD": "持有", "WAIT": "等待"}
 
@@ -58,6 +66,7 @@ class TradeWidget(QWidget):
         db: Database,
         config: Dict,
         get_signals: Callable[[], Dict[str, Tuple[str, str]]],
+        get_weekly: Optional[Callable[[], Optional[object]]] = None,
         on_changed: Optional[Callable[[], None]] = None,
         parent: Optional[QWidget] = None,
     ):
@@ -65,6 +74,7 @@ class TradeWidget(QWidget):
         self.db = db
         self.config = config
         self.get_signals = get_signals
+        self.get_weekly = get_weekly or (lambda: None)
         self.on_changed = on_changed
         self._build_ui()
 
@@ -82,9 +92,9 @@ class TradeWidget(QWidget):
 
         v.addWidget(QLabel("成交记录："))
         self.trade_table = QTableWidget()
-        self.trade_table.setColumnCount(8)
+        self.trade_table.setColumnCount(9)
         self.trade_table.setHorizontalHeaderLabels(
-            ["ID", "仓位", "动作", "信号日期", "执行日期", "股息率", "成交价", "金额/备注"]
+            ["ID", "仓位", "动作", "信号数据日期", "执行日期", "股息率", "锁定M42", "成交价", "金额/备注"]
         )
         self.trade_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         v.addWidget(self.trade_table)
@@ -93,20 +103,24 @@ class TradeWidget(QWidget):
     def refresh(self) -> None:
         positions = self.db.get_positions()
         signals = self.get_signals()
+        locked = self.get_weekly() is not None
         self.pos_table.setRowCount(len(positions))
         for i, p in enumerate(positions):
             act, _ = signals.get(p.name, ("WAIT", ""))
             self.pos_table.setItem(i, 0, QTableWidgetItem(f"{p.label} {p.percent:.0f}%"))
             self.pos_table.setItem(i, 1, QTableWidgetItem(p.status))
             self.pos_table.setItem(i, 2, QTableWidgetItem(p.buy_date or "-"))
-            self.pos_table.setItem(i, 3, QTableWidgetItem(f"{p.buy_yield:.2f}" if p.buy_yield else "-"))
+            self.pos_table.setItem(i, 3, QTableWidgetItem(fmt_yield(p.buy_yield, 2) if p.buy_yield else "-"))
             self.pos_table.setItem(i, 4, QTableWidgetItem(f"{p.buy_price:.3f}" if p.buy_price else "-"))
             self.pos_table.setItem(i, 5, QTableWidgetItem(p.sell_date or "-"))
-            self.pos_table.setItem(i, 6, QTableWidgetItem(f"{p.sell_yield:.2f}" if p.sell_yield else "-"))
+            self.pos_table.setItem(i, 6, QTableWidgetItem(fmt_yield(p.sell_yield, 2) if p.sell_yield else "-"))
             self.pos_table.setItem(i, 7, QTableWidgetItem(f"{p.sell_price:.3f}" if p.sell_price else "-"))
 
             btn = QPushButton()
-            if act == ACT_BUY and p.status == POS_EMPTY:
+            if not locked:
+                btn.setText("未锁定·禁止")
+                btn.setEnabled(False)
+            elif act == ACT_BUY and p.status == POS_EMPTY:
                 btn.setText("确认已买入")
                 btn.clicked.connect(lambda _=False, n=p.name: self._confirm_buy(n))
             elif act == ACT_SELL and p.status == POS_HOLDING:
@@ -126,16 +140,20 @@ class TradeWidget(QWidget):
             self.trade_table.setItem(i, 0, QTableWidgetItem(str(t.id)))
             self.trade_table.setItem(i, 1, QTableWidgetItem(t.position_name))
             self.trade_table.setItem(i, 2, QTableWidgetItem(SIGNAL_NAMES.get(t.action, t.action)))
-            self.trade_table.setItem(i, 3, QTableWidgetItem(t.signal_date))
+            self.trade_table.setItem(i, 3, QTableWidgetItem(t.signal_data_date or "-"))
             self.trade_table.setItem(i, 4, QTableWidgetItem(t.execution_date))
-            self.trade_table.setItem(i, 5, QTableWidgetItem(f"{t.dividend_yield:.2f}" if t.dividend_yield else "-"))
-            self.trade_table.setItem(i, 6, QTableWidgetItem(f"{t.etf_price:.3f}" if t.etf_price else "-"))
+            self.trade_table.setItem(i, 5, QTableWidgetItem(fmt_yield(t.dividend_yield, 2) if t.dividend_yield else "-"))
+            self.trade_table.setItem(i, 6, QTableWidgetItem(fmt_yield(t.m42, 3) if t.m42 else "-"))
+            self.trade_table.setItem(i, 7, QTableWidgetItem(f"{t.etf_price:.3f}" if t.etf_price else "-"))
             extra = f"{t.amount:.2f}" if t.amount else "-"
             if t.note:
                 extra += f" / {t.note}"
-            self.trade_table.setItem(i, 7, QTableWidgetItem(extra))
+            self.trade_table.setItem(i, 8, QTableWidgetItem(extra))
 
     def _confirm_buy(self, name: str) -> None:
+        ws = self.get_weekly()
+        if ws is None:
+            return  # 安全闸门：未锁定禁止成交
         dlg = _ConfirmDialog(ACT_BUY, name, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -144,9 +162,13 @@ class TradeWidget(QWidget):
         p = self.db.get_position(name)
         if p is None:
             return
+        latest = self.db.get_latest()
+        cur_yield = latest.dividend_yield_2 if latest else None
+        today = _dt.date.today().isoformat()
         p.status = POS_HOLDING
-        p.buy_date = _dt.date.today().isoformat()
-        p.buy_yield = self._current_yield()
+        p.buy_date = today
+        p.buy_yield = cur_yield
+        p.buy_close = latest.close if latest else None
         p.sell_date = None
         p.sell_yield = None
         p.sell_price = None
@@ -154,12 +176,14 @@ class TradeWidget(QWidget):
         price = dlg.price.value()
         amount = dlg.amount.value()
         shares = (amount / price) if price > 0 else 0.0
+        thr = thresholds_from_weekly(ws)
         self.db.add_trade(
             Trade(
                 id=None, position_name=name, action=ACT_BUY,
-                signal_date=p.buy_date, execution_date=p.buy_date,
-                dividend_yield=p.buy_yield, m42=self._current_m42(),
-                threshold=self._current_thresholds().get(f"{name}_buy"),
+                signal_date=today, execution_date=today,
+                signal_data_date=latest.date.isoformat() if latest else today,
+                dividend_yield=cur_yield, m42=ws.m42,
+                threshold=thr.get(f"{name}_buy"),
                 percentage=p.percent, etf_price=price if price > 0 else None,
                 shares=shares if price > 0 else None,
                 amount=amount if amount > 0 else None, note=dlg.note.text() or None,
@@ -170,25 +194,33 @@ class TradeWidget(QWidget):
             self.on_changed()
 
     def _confirm_sell(self, name: str) -> None:
+        ws = self.get_weekly()
+        if ws is None:
+            return
         dlg = _ConfirmDialog(ACT_SELL, name, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         p = self.db.get_position(name)
         if p is None:
             return
+        latest = self.db.get_latest()
+        cur_yield = latest.dividend_yield_2 if latest else None
+        today = _dt.date.today().isoformat()
         p.status = POS_EMPTY
-        p.sell_date = _dt.date.today().isoformat()
-        p.sell_yield = self._current_yield()
+        p.sell_date = today
+        p.sell_yield = cur_yield
         self.db.save_position(p)
         price = dlg.price.value()
         amount = dlg.amount.value()
         shares = (amount / price) if price > 0 else 0.0
+        thr = thresholds_from_weekly(ws)
         self.db.add_trade(
             Trade(
                 id=None, position_name=name, action=ACT_SELL,
-                signal_date=p.sell_date, execution_date=p.sell_date,
-                dividend_yield=p.sell_yield, m42=self._current_m42(),
-                threshold=self._current_thresholds().get(f"{name}_sell"),
+                signal_date=today, execution_date=today,
+                signal_data_date=latest.date.isoformat() if latest else today,
+                dividend_yield=cur_yield, m42=ws.m42,
+                threshold=thr.get(f"{name}_sell"),
                 percentage=p.percent, etf_price=price if price > 0 else None,
                 shares=shares if price > 0 else None,
                 amount=amount if amount > 0 else None, note=dlg.note.text() or None,
@@ -197,27 +229,3 @@ class TradeWidget(QWidget):
         self.refresh()
         if self.on_changed:
             self.on_changed()
-
-    # 由 main_window 注入的上下文
-    def _current_yield(self) -> Optional[float]:
-        rec = self.db.get_latest()
-        return rec.dividend_yield_2 if rec else None
-
-    def _current_m42(self) -> Optional[float]:
-        recs = self.db.get_all_valuations()
-        if len(recs) < 42:
-            return None
-        return self._rolling_m42(recs, 42)
-
-    @staticmethod
-    def _rolling_m42(recs, n):
-        from ..strategy import rolling_median
-        vals = [r.dividend_yield_2 for r in recs if r.dividend_yield_2 is not None]
-        return rolling_median(vals, n)
-
-    def _current_thresholds(self) -> Dict[str, float]:
-        from ..strategy import compute_thresholds
-        m42 = self._current_m42()
-        if m42 is None:
-            return {}
-        return compute_thresholds(m42, self.config)
