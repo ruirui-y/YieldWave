@@ -18,7 +18,7 @@ import datetime as _dt
 import os
 import sqlite3
 from decimal import Decimal
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .precision import D
 
@@ -39,6 +39,20 @@ from .models import (
 
 def _now() -> str:
     return _dt.datetime.now().isoformat(timespec="seconds")
+
+
+def _to_dash(value) -> str:
+    """日期 -> "YYYY-MM-DD"（统一缓存键格式）。"""
+    if isinstance(value, _dt.date):
+        return value.isoformat()
+    s = str(value).strip()
+    if "-" in s:
+        return s[:10]
+    if "/" in s:
+        return s.replace("/", "-")[:10]
+    if len(s) == 8:
+        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+    return s
 
 
 def _f(v) -> Optional[float]:
@@ -161,7 +175,149 @@ class Database:
             )
             """
         )
+        # ---- 行情点位缓存（CSI 公开接口） ----
+        # index_close：每日 H30269 收盘点位缓存，避免重复请求
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS index_close (
+                date        TEXT PRIMARY KEY,
+                index_code  TEXT,
+                close       REAL,
+                source      TEXT,
+                fetched_at  TEXT
+            )
+            """
+        )
+        # last_quote：最后一次成功的“当前盘中点位”快照（网络失败时兜底使用）
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS last_quote (
+                id           INTEGER PRIMARY KEY CHECK (id = 1),
+                index_code   TEXT,
+                trade_date   TEXT,
+                trade_time   TEXT,
+                current      REAL,
+                pre_close    REAL,
+                source       TEXT,
+                fetched_at   TEXT
+            )
+            """
+        )
         self.conn.commit()
+
+    # ---------- index close cache ----------
+    def upsert_index_close(self, date: str, close: float, index_code: str = "H30269", source: str = "csindex") -> None:
+        """按 date UPSERT 一条收盘点位。"""
+        if close is None:
+            return
+        self.conn.execute(
+            """
+            INSERT INTO index_close (date, index_code, close, source, fetched_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(date) DO UPDATE SET
+                index_code=excluded.index_code,
+                close=excluded.close,
+                source=excluded.source,
+                fetched_at=excluded.fetched_at
+            """,
+            (_to_dash(date), index_code, float(close), source, _now()),
+        )
+        self.conn.commit()
+
+    def upsert_index_close_many(self, mapping: dict, index_code: str = "H30269", source: str = "csindex") -> int:
+        """批量 UPSERT 收盘点位。单事务，失败回滚。"""
+        if not mapping:
+            return 0
+        self.conn.execute("BEGIN")
+        try:
+            for d, c in mapping.items():
+                if c is None:
+                    continue
+                self.conn.execute(
+                    """
+                    INSERT INTO index_close (date, index_code, close, source, fetched_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(date) DO UPDATE SET
+                        index_code=excluded.index_code,
+                        close=excluded.close,
+                        source=excluded.source,
+                        fetched_at=excluded.fetched_at
+                    """,
+                    (_to_dash(d), index_code, float(c), source, _now()),
+                )
+            self.conn.commit()
+            return sum(1 for v in mapping.values() if v is not None)
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def get_index_close(self, date: str) -> Optional[float]:
+        """按日期取 close（无则 None）。"""
+        row = self.conn.execute(
+            "SELECT close FROM index_close WHERE date=?", (_to_dash(date),)
+        ).fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+
+    def get_index_close_range(self, start_date: str, end_date: str) -> "Dict[str, float]":
+        """取 [start, end] 闭区间内缓存的 close 字典（{YYYY-MM-DD: float}）。"""
+        rows = self.conn.execute(
+            "SELECT date, close FROM index_close WHERE date BETWEEN ? AND ? ORDER BY date ASC",
+            (_to_dash(start_date), _to_dash(end_date)),
+        ).fetchall()
+        return {r["date"]: float(r["close"]) for r in rows if r["close"] is not None}
+
+    def latest_cached_close_date(self) -> Optional[str]:
+        """缓存中最新 close 的日期（无则 None）。"""
+        row = self.conn.execute(
+            "SELECT MAX(date) FROM index_close"
+        ).fetchone()
+        return row[0] if row and row[0] else None
+
+    # ---------- last quote (intraday current point) ----------
+    def save_last_quote(self, quote) -> None:
+        """保存最后一次成功的盘中点位快照（id=1 单行）。"""
+        from .services.market_quote import CurrentQuote
+        if quote is None:
+            return
+        self.conn.execute(
+            """
+            INSERT INTO last_quote (id, index_code, trade_date, trade_time, current, pre_close, source, fetched_at)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                index_code=excluded.index_code,
+                trade_date=excluded.trade_date,
+                trade_time=excluded.trade_time,
+                current=excluded.current,
+                pre_close=excluded.pre_close,
+                source=excluded.source,
+                fetched_at=excluded.fetched_at
+            """,
+            (
+                getattr(quote, "index_code", "H30269") if hasattr(quote, "index_code") else "H30269",
+                quote.trade_date, quote.trade_time,
+                quote.current, quote.pre_close,
+                getattr(quote, "source", "csindex"),
+                _now(),
+            ),
+        )
+        self.conn.commit()
+
+    def get_last_quote(self):
+        """读最后一次成功的盘中点位快照（无则 None）。"""
+        from .services.market_quote import CurrentQuote
+        row = self.conn.execute(
+            "SELECT * FROM last_quote WHERE id=1"
+        ).fetchone()
+        if not row:
+            return None
+        r = dict(row)
+        return CurrentQuote(
+            trade_date=r.get("trade_date", ""),
+            trade_time=r.get("trade_time", ""),
+            current=r.get("current"),
+            pre_close=r.get("pre_close"),
+            source=r.get("source", "csindex"),
+        )
 
     # ---------- valuation ----------
     def upsert_valuation(self, rec: ValuationRecord, commit: bool = True) -> None:

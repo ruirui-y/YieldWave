@@ -126,6 +126,7 @@ def weekly_locked_thresholds_for_records(
     - 下周第一个交易日重新计算并锁定。
 
     返回与 records 等长的列表：每个元素是该记录对应的锁定阈值字典，或 None（数据不足）。
+    每个字典同时包含 "M42" 键（该周锁定中枢，便于走势图 tooltip 直接读取，避免反向推断偏移）。
     """
     if not records:
         return []
@@ -135,7 +136,7 @@ def weekly_locked_thresholds_for_records(
     for idx, r in enumerate(records):
         wid = current_week_id(r.date)
         weeks.setdefault(wid, []).append(idx)
-    out: List[Optional[Dict[str, float]]] = [None] * len(records)
+    out: List[Optional[Dict[str, Decimal]]] = [None] * len(records)
     for idxs in weeks.values():
         first_idx = idxs[0]
         # 仅使用截至锁定日（含）当时可见的 D/P2，严格无未来泄漏
@@ -146,6 +147,8 @@ def weekly_locked_thresholds_for_records(
         ]
         m = rolling_median(past, win) if past else None
         thr = compute_thresholds(m, config) if m is not None else None
+        if thr is not None and m is not None:
+            thr["M42"] = m  # 同步锁定中枢，便于走势图 tooltip 直接读
         for i in idxs:
             out[i] = thr
     return out

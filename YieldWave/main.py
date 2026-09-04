@@ -5,7 +5,8 @@
 1. 加载配置
 2. 打开 SQLite（建表，初始化仓位状态）
 3. 若今天尚未更新过，自动尝试更新红利查一次（网络失败不影响启动，沿用本地数据）
-4. 创建主窗口并显示
+4. 应用全局深色主题
+5. 创建主窗口并显示（主窗口会异步刷新当前指数点位）
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from yieldwave.config import ensure_dirs, get_user_agent, load_config
 from yieldwave.database import Database
 from yieldwave.data_sources import honglicha
 from yieldwave.ui import MainWindow
+from yieldwave.ui.theme import apply_dark_theme
 
 
 def auto_update_once(db: Database, config) -> None:
@@ -65,6 +67,7 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     app.setApplicationName("YieldWave")
+    apply_dark_theme(app)  # 全局深色 QSS + QPalette 兜底
     window = MainWindow(db, config)
     window.show()
     sys.exit(app.exec())

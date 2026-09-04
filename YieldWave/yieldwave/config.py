@@ -44,6 +44,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_per_day": 4,
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     },
+    "market_quote": {
+        "enabled": True,
+        "refresh_seconds": 60,
+        "source": "csindex",
+        "index_code": "H30269",
+        "timeout_seconds": 15,
+    },
 }
 
 
