@@ -7,8 +7,10 @@
 - 因此解析方式：请求页面 HTML（带浏览器 UA，无需登录/验证码），用正则定位每个
   `option:` 后的平衡 JSON，找到含 "DP2"/"DP1" 的图（股息率）与含 "PE2"/"PE1" 的图（市盈率），
   按 xAxis 的日期对齐，得到 dividend_yield_1/2、pe_1/2。
-- 该页面当前内嵌约 115 个交易日（约半年）的历史；程序首次运行即写入本地库，之后每日
-  增量 UPSERT，运行满一年后本地自然拥有一年以上历史。
+- 该页面当前内嵌 **115 个交易日（2026-03-25 ~ 2026-09-02，约 5.7 个月）** 的历史序列；
+  经重新调查（detail.js 仅做渲染、无数据接口、页面无时间范围选择器、所有图表块日期数一致），
+  **公开页面可访问的 D/P2 历史最长即 115 个交易日，并非一年**。程序首次运行即写入本地库，
+  之后每日增量 UPSERT；随运行时间累积，本地历史会自然变长。
 - 页面不提供指数点位（close），因此该字段为 None。
 
 健壮性：若页面结构变化导致解析不到任何记录，parse_html 返回空列表，调用方据此显示
@@ -24,6 +26,7 @@ import urllib.request
 from typing import List, Optional, Tuple
 
 from ..models import ValuationRecord
+from ..precision import D
 
 HONGLICHA_URL = "https://www.honglicha.com/H30269/"
 INDEX_CODE = "H30269"
@@ -114,10 +117,10 @@ def parse_html(html: str) -> List[ValuationRecord]:
                 date=dt,
                 index_code=INDEX_CODE,
                 index_name=INDEX_NAME,
-                dividend_yield_1=dy1[i] if i < len(dy1) else None,
-                dividend_yield_2=dy2[i] if i < len(dy2) else None,
-                pe_1=pe1[i] if i < len(pe1) else None,
-                pe_2=pe2[i] if i < len(pe2) else None,
+                dividend_yield_1=D(dy1[i]) if i < len(dy1) else None,
+                dividend_yield_2=D(dy2[i]) if i < len(dy2) else None,
+                pe_1=D(pe1[i]) if i < len(pe1) else None,
+                pe_2=D(pe2[i]) if i < len(pe2) else None,
                 close=None,  # 红利查详情页不提供指数点位
                 source="honglicha",
                 fetched_at=fetched_at,

@@ -3,6 +3,7 @@
 import os
 import statistics
 import unittest
+from decimal import Decimal
 
 from yieldwave.data_sources import honglicha
 from yieldwave.strategy import compute_medians
@@ -19,7 +20,7 @@ class TestHonglichaParser(unittest.TestCase):
         recs = honglicha.parse_html(self.html)
         self.assertGreaterEqual(len(recs), 100)  # 真实历史序列（非一行）
         self.assertEqual(recs[-1].date.isoformat(), "2026-09-02")
-        self.assertAlmostEqual(recs[-1].dividend_yield_2, 4.77, places=2)
+        self.assertEqual(recs[-1].dividend_yield_2, Decimal("4.77"))
         # D/P1 与 D/P2 均存在
         self.assertIsNotNone(recs[-1].dividend_yield_1)
         self.assertIsNotNone(recs[-1].pe_1)
@@ -29,7 +30,7 @@ class TestHonglichaParser(unittest.TestCase):
         recs = honglicha.parse_html(self.html)
         m = compute_medians(recs, {"M42": 42})
         # 已验证：M42 ≈ 4.835
-        self.assertAlmostEqual(m["M42"], 4.835, places=2)
+        self.assertEqual(m["M42"], Decimal("4.835"))
 
     def test_parse_garbage_returns_empty(self):
         self.assertEqual(honglicha.parse_html("<html><body>无数据</body></html>"), [])
