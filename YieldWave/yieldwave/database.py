@@ -1,7 +1,7 @@
 """SQLite 数据库封装。
 
 表：
-- h30269_valuation : 历史估值（按 date 主键去重，UPSERT，永不删除更早历史）
+- h30269_valuation : 历史估值（按 date + index_code 判定去重，UPSERT，永不删除更早历史）
 - weekly_strategy  : 周度锁定策略（按 week_id 主键）
 - positions        : 各波段仓状态（按 name 主键）
 - trades           : 交易确认记录（自增 id）
@@ -425,29 +425,51 @@ class Database:
 
     # ---------- valuation ----------
     def upsert_valuation(self, rec: ValuationRecord, commit: bool = True) -> None:
-        """按 date UPSERT：已存在的日期更新，新的日期插入。"""
+        """按 date + index_code UPSERT 官方历史估值。
+
+        - 数据库已有相同 (date, index_code)：UPDATE 为最新官方字段；
+        - 数据库没有该记录：INSERT；
+        - 不 DELETE、不 DROP、不重建表；
+        - 官网滚动掉的老日期不会从本地数据库删除。
+        """
+        if rec.date is None:
+            raise ValueError("ValuationRecord.date cannot be None")
         row = rec.to_row()
         row["fetched_at"] = rec.fetched_at or _now()
-        self.conn.execute(
-            """
-            INSERT INTO h30269_valuation
-                (date, index_code, index_name, dividend_yield_1, dividend_yield_2,
-                 pe_1, pe_2, close, source, fetched_at)
-            VALUES (:date, :index_code, :index_name, :dividend_yield_1, :dividend_yield_2,
-                    :pe_1, :pe_2, :close, :source, :fetched_at)
-            ON CONFLICT(date) DO UPDATE SET
-                index_code=excluded.index_code,
-                index_name=excluded.index_name,
-                dividend_yield_1=excluded.dividend_yield_1,
-                dividend_yield_2=excluded.dividend_yield_2,
-                pe_1=excluded.pe_1,
-                pe_2=excluded.pe_2,
-                close=excluded.close,
-                source=excluded.source,
-                fetched_at=excluded.fetched_at
-            """,
-            row,
-        )
+
+        exists = self.conn.execute(
+            "SELECT 1 FROM h30269_valuation WHERE date=? AND index_code=?",
+            (row["date"], row["index_code"]),
+        ).fetchone()
+
+        if exists:
+            self.conn.execute(
+                """
+                UPDATE h30269_valuation SET
+                    index_name=:index_name,
+                    dividend_yield_1=:dividend_yield_1,
+                    dividend_yield_2=:dividend_yield_2,
+                    pe_1=:pe_1,
+                    pe_2=:pe_2,
+                    close=:close,
+                    source=:source,
+                    fetched_at=:fetched_at
+                WHERE date=:date AND index_code=:index_code
+                """,
+                row,
+            )
+        else:
+            self.conn.execute(
+                """
+                INSERT INTO h30269_valuation
+                    (date, index_code, index_name, dividend_yield_1, dividend_yield_2,
+                     pe_1, pe_2, close, source, fetched_at)
+                VALUES
+                    (:date, :index_code, :index_name, :dividend_yield_1, :dividend_yield_2,
+                     :pe_1, :pe_2, :close, :source, :fetched_at)
+                """,
+                row,
+            )
         if commit:
             self.conn.commit()
 
@@ -494,6 +516,13 @@ class Database:
     def get_by_date(self, date: str) -> Optional[ValuationRecord]:
         row = self.conn.execute(
             "SELECT * FROM h30269_valuation WHERE date=?", (date,)
+        ).fetchone()
+        return ValuationRecord.from_row(dict(row)) if row else None
+
+    def get_by_date_and_index_code(self, date: str, index_code: str) -> Optional[ValuationRecord]:
+        row = self.conn.execute(
+            "SELECT * FROM h30269_valuation WHERE date=? AND index_code=?",
+            (_to_dash(date), index_code),
         ).fetchone()
         return ValuationRecord.from_row(dict(row)) if row else None
 

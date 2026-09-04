@@ -395,5 +395,55 @@ class TestEstimatedDp2DailyPersistence(unittest.TestCase):
         self.assertEqual(self.db.count_estimated_dp2(), 1)
 
 
+class TestOfficialHistoryIncrementalUpsert(unittest.TestCase):
+    """官网滚动窗口情况下，历史必须增量累计且不删除老日期。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = Database(os.path.join(self.tmp, "test.db"))
+
+    def tearDown(self):
+        self.db.close()
+
+    @staticmethod
+    def _date_range(start: str, end: str) -> list:
+        cur = _dt.date.fromisoformat(start)
+        stop = _dt.date.fromisoformat(end)
+        out = []
+        while cur <= stop:
+            out.append(cur.isoformat())
+            cur += _dt.timedelta(days=1)
+        return out
+
+    def test_second_fetch_rolling_window_preserves_old_date_and_adds_new_date(self):
+        first_dates = self._date_range("2026-03-25", "2026-09-02")
+        second_dates = self._date_range("2026-03-26", "2026-09-03")
+
+        # 第一次官网返回 03-25 ~ 09-02
+        self.db.upsert_many([_rec(d, 4.80) for d in first_dates])
+        self.assertIsNotNone(self.db.get_by_date("2026-03-25"))
+        self.assertIsNone(self.db.get_by_date("2026-09-03"))
+
+        # 第二次官网滚动掉 03-25，但新增 09-03
+        self.db.upsert_many([_rec(d, 4.81) for d in second_dates])
+
+        # 老日期必须永久保留
+        old = self.db.get_by_date("2026-03-25")
+        self.assertIsNotNone(old)
+        self.assertEqual(old.dividend_yield_2, Decimal("4.80"))
+
+        # 新日期必须插入
+        new = self.db.get_by_date("2026-09-03")
+        self.assertIsNotNone(new)
+        self.assertEqual(new.dividend_yield_2, Decimal("4.81"))
+
+        # 已有日期更新为最新抓取值
+        updated = self.db.get_by_date("2026-03-26")
+        self.assertEqual(updated.dividend_yield_2, Decimal("4.81"))
+
+        # 最终条数 = 第一次条数 + 第二次新增的 09-03
+        self.assertEqual(self.db.count(), len(first_dates) + 1)
+
+
 if __name__ == "__main__":
     unittest.main()
