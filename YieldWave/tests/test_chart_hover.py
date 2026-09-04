@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime as _dt
 import unittest
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import List, Optional
 
 import numpy as np
@@ -208,6 +209,205 @@ class TestWeeklyLockIncludesM42(unittest.TestCase):
         self.assertEqual(locks[5]["M42"], Decimal("4.90"))
         # A/B/C 阈值未变（向后兼容）
         self.assertEqual(locks[5]["A_buy"], Decimal("4.92"))
+
+
+class _QtTooltipTestCase(unittest.TestCase):
+    """headless ChartWidget 测试基类：QApplication + 21 条记录 + 固定坐标轴。
+
+    set_data 会创建 annotation；固定 xlim/ylim 让 transData 映射可预测。
+    不 show() 任何窗口；draw 一次让真实文本排版可被 get_window_extent 测量。
+    """
+
+    def setUp(self) -> None:
+        try:
+            import sys
+
+            from PyQt6.QtWidgets import QApplication
+
+            from yieldwave.ui.chart_widget import ChartWidget
+
+            self._app = QApplication.instance() or QApplication(sys.argv)
+            self.ChartWidget = ChartWidget
+        except Exception as exc:
+            self.skipTest(f"无法初始化 Qt：{exc}")
+        recs = [
+            _rec(f"2026-09-{i:02d}", 4.00 + i * 0.01)
+            for i in range(1, 22)
+        ]
+        self.cw = self.ChartWidget()
+        self.cw.set_data(recs, {})
+        self.ax = self.cw._ax
+        self.ann = self.cw._annotation
+        self.ax.set_xlim(0.0, 20.0)
+        self.ax.set_ylim(0.0, 10.0)
+        # 真实文本 + 可见状态：空文本/不可见文本不会参与排版，bbox 测量不可靠，
+        # 可能把第二级 clamp 误触发，污染四象限/锚点的纯逻辑断言。
+        self.ann.set_text("日期：2026-09-01\n股息率2 D/P2：4.10%")
+        self.ann.set_visible(True)
+        self.ann.set_alpha(1.0)
+        self.cw.canvas.draw()
+
+
+class TestTooltipPlacementQuadrants(_QtTooltipTestCase):
+    """_place_tooltip 四象限避让：只依赖 axes 几何，headless 稳定可跑。
+
+    期望映射（锚点在 axes 中的位置 -> tooltip 方位）：
+    - 左下点 -> tooltip 右上（ha=left,  va=bottom, offset=(+20, +20)）
+    - 左上点 -> tooltip 右下（ha=left,  va=top,    offset=(+20, -20)）
+    - 右下点 -> tooltip 左上（ha=right, va=bottom, offset=(-20, +20)）
+    - 右上点 -> tooltip 左下（ha=right, va=top,    offset=(-20, -20)）
+    """
+
+    def test_bottom_left_anchor(self):
+        # 左下点（axes 左半边 + 下半边）-> tooltip 右上
+        self.cw._place_tooltip(1.0, 1.0)
+        self.assertEqual(self.ann.get_ha(), "left")
+        self.assertEqual(self.ann.get_va(), "bottom")
+        ox, oy = self.ann.get_position()
+        self.assertAlmostEqual(ox, 20.0, places=6)
+        self.assertAlmostEqual(oy, 20.0, places=6)
+        self.assertEqual(tuple(self.ann.xy), (1.0, 1.0))
+
+    def test_top_left_anchor(self):
+        # 左上点（axes 左半边 + 上半边）-> tooltip 右下
+        self.cw._place_tooltip(1.0, 9.0)
+        self.assertEqual(self.ann.get_ha(), "left")
+        self.assertEqual(self.ann.get_va(), "top")
+        ox, oy = self.ann.get_position()
+        self.assertAlmostEqual(ox, 20.0, places=6)
+        self.assertAlmostEqual(oy, -20.0, places=6)
+        self.assertEqual(tuple(self.ann.xy), (1.0, 9.0))
+
+    def test_bottom_right_anchor(self):
+        # 右下点（axes 右半边 + 下半边）-> tooltip 左上
+        self.cw._place_tooltip(19.0, 1.0)
+        self.assertEqual(self.ann.get_ha(), "right")
+        self.assertEqual(self.ann.get_va(), "bottom")
+        ox, oy = self.ann.get_position()
+        self.assertAlmostEqual(ox, -20.0, places=6)
+        self.assertAlmostEqual(oy, 20.0, places=6)
+        self.assertEqual(tuple(self.ann.xy), (19.0, 1.0))
+
+    def test_top_right_anchor(self):
+        # 右上点（axes 右半边 + 上半边）-> tooltip 左下
+        self.cw._place_tooltip(19.0, 9.0)
+        self.assertEqual(self.ann.get_ha(), "right")
+        self.assertEqual(self.ann.get_va(), "top")
+        ox, oy = self.ann.get_position()
+        self.assertAlmostEqual(ox, -20.0, places=6)
+        self.assertAlmostEqual(oy, -20.0, places=6)
+        self.assertEqual(tuple(self.ann.xy), (19.0, 9.0))
+
+
+class TestTooltipFigureClamp(_QtTooltipTestCase):
+    """_place_tooltip 第二级保护：最终 bbox 必须留在 figure 8px 安全边距内。
+
+    两种验证：
+    1. 确定性 clamp 数学：monkeypatch annotation.get_window_extent 返回固定越界
+       bbox，断言 offset 补偿量 = 越界 px * (72/dpi)（不依赖字体排版，必稳定）。
+    2. 真实 bbox 安全网：用真实多行中文文本 + 真实 draw，遍历代表性锚点，断言
+       测量到的最终 bbox 不越出 figure.bbox 的 8px 边距。
+    """
+
+    def _patch_window_extent(self, bounds: tuple[float, float, float, float]) -> None:
+        from matplotlib.transforms import Bbox
+
+        self.ann.get_window_extent = lambda renderer=None: Bbox.from_extents(*bounds)
+
+    def _px_to_pt(self) -> float:
+        return 72.0 / self.cw.figure.dpi
+
+    def test_clamp_pushes_left_when_overflowing_right(self):
+        # tooltip 越过 figure 右边界 58px -> offset_x 减小 58px 折算的 pt
+        self._patch_window_extent((600.0, 200.0, 850.0, 300.0))
+        self.cw._place_tooltip(1.0, 1.0)
+        ox, oy = self.ann.get_position()
+        self.assertAlmostEqual(ox, 20.0 - 58.0 * self._px_to_pt(), places=6)
+        self.assertAlmostEqual(oy, 20.0, places=6)
+
+    def test_clamp_pushes_down_when_overflowing_top(self):
+        # tooltip 越过 figure 上边界 38px -> offset_y 减小 38px 折算的 pt
+        self._patch_window_extent((300.0, 300.0, 500.0, 450.0))
+        self.cw._place_tooltip(1.0, 1.0)
+        ox, oy = self.ann.get_position()
+        self.assertAlmostEqual(ox, 20.0, places=6)
+        self.assertAlmostEqual(oy, 20.0 - 38.0 * self._px_to_pt(), places=6)
+
+    def test_clamp_pushes_right_and_up_when_overflowing_left_bottom(self):
+        # 同时越左边界 48px、下边界 38px -> offset_x/offset_y 都相应增大
+        self._patch_window_extent((-40.0, -30.0, 100.0, 50.0))
+        self.cw._place_tooltip(1.0, 1.0)
+        ox, oy = self.ann.get_position()
+        self.assertAlmostEqual(ox, 20.0 + 48.0 * self._px_to_pt(), places=6)
+        self.assertAlmostEqual(oy, 20.0 + 38.0 * self._px_to_pt(), places=6)
+
+    def test_no_change_when_already_inside(self):
+        # bbox 完全在边距内 -> offset 不动
+        self._patch_window_extent((100.0, 100.0, 300.0, 300.0))
+        self.cw._place_tooltip(1.0, 1.0)
+        ox, oy = self.ann.get_position()
+        self.assertAlmostEqual(ox, 20.0, places=6)
+        self.assertAlmostEqual(oy, 20.0, places=6)
+
+    def _full_tooltip_text(self) -> str:
+        locks = {
+            "M42": D("4.50"),
+            "A_buy": D("4.52"), "A_sell": D("4.47"),
+            "B_buy": D("4.57"), "B_sell": D("4.42"),
+            "C_buy": D("4.62"), "C_sell": D("4.37"),
+        }
+        return self.cw._build_tooltip_text(_dt.date(2026, 9, 5), 4.2, 4.5, locks)
+
+    def test_real_bbox_never_crosses_figure_margin(self):
+        # 用真实多行 tooltip 文本遍历代表性锚点：最终测量 bbox 不越 figure 8px 边距
+        w = float(self.cw.figure.bbox.width)
+        h = float(self.cw.figure.bbox.height)
+        margin = 8.0
+        tol = 1.0
+        self.ann.set_text(self._full_tooltip_text())
+        self.ann.set_visible(True)
+        self.ann.set_alpha(1.0)
+        self.cw.canvas.draw()
+        renderer = self.cw.canvas.get_renderer()
+        anchors = [
+            (1.0, 1.0), (1.0, 9.0), (19.0, 1.0), (19.0, 9.0),  # 四角
+            (10.0, 4.0), (10.0, 6.0),  # 中部两侧（真实文本够高，会触发 clamp）
+        ]
+        for xi, ay in anchors:
+            self.cw._place_tooltip(xi, ay)
+            bb = self.ann.get_window_extent(renderer=renderer)
+            msg = f"anchor=({xi},{ay}) bbox={bb.bounds} fig=({w},{h})"
+            self.assertGreaterEqual(bb.x0, margin - tol, msg=f"左越界 {msg}")
+            self.assertGreaterEqual(bb.y0, margin - tol, msg=f"下越界 {msg}")
+            self.assertLessEqual(bb.x1, w - margin + tol, msg=f"右越界 {msg}")
+            self.assertLessEqual(bb.y1, h - margin + tol, msg=f"上越界 {msg}")
+
+
+class TestHoverAnchorSelection(_QtTooltipTestCase):
+    """_on_motion 锚点优先级：D/P2 -> M42 -> y 轴中点（NaN 兜底）。"""
+
+    def _event(self, xdata: float) -> SimpleNamespace:
+        return SimpleNamespace(inaxes=self.ax, xdata=xdata)
+
+    def test_valid_dp2_uses_dp2_anchor(self):
+        # xdata=5.4 吸附到 idx=5：dp2 有效 -> 锚点 = (xi, dp2) = (5, 4.06)
+        self.cw._on_motion(self._event(5.4))
+        self.assertTrue(self.ann.get_visible())
+        self.assertEqual(tuple(self.ann.xy), (5.0, 4.00 + 6 * 0.01))
+
+    def test_nan_dp2_falls_back_to_m42_anchor(self):
+        # dp2=NaN 但 m42 有效 -> 锚点取 m42（此处 idx=5 -> 4.50）
+        self.cw._visible_dp2[5] = float("nan")
+        self.cw._visible_m42[5] = 4.50
+        self.cw._on_motion(self._event(5.4))
+        self.assertEqual(tuple(self.ann.xy), (5.0, 4.50))
+
+    def test_all_nan_uses_ylim_midpoint_anchor(self):
+        # dp2 与 m42 都 NaN -> 锚点 = y 轴中点（ylim(0,10) -> 5.0）
+        self.cw._visible_dp2[5] = float("nan")
+        self.cw._visible_m42[5] = float("nan")
+        self.cw._on_motion(self._event(5.4))
+        self.assertEqual(tuple(self.ann.xy), (5.0, 5.0))
 
 
 if __name__ == "__main__":

@@ -315,5 +315,85 @@ class TestWalBackupConsistency(unittest.TestCase):
             db2.close()
 
 
+class TestEstimatedDp2DailyPersistence(unittest.TestCase):
+    """每日估算 D/P2 独立表测试。
+
+    - 同一天运行两次 -> 只有一条，第二次更新数值
+    - 不同交易日分别保存
+    - 不会写入官方 h30269_valuation 表
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = Database(os.path.join(self.tmp, "test.db"))
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_same_day_twice_updates_single_row(self):
+        # 先给官方表塞一条，验证估算写入不影响官方条数
+        self.db.upsert_valuation(_rec("2026-09-02", 4.77))
+        official_before = self.db.count()
+
+        self.db.upsert_estimated_dp2(
+            trade_date="2026-09-04",
+            estimated_dp2=Decimal("4.7745576678"),
+            index_point=Decimal("11072.90"),
+            anchor_date="2026-09-02",
+            anchor_dp2=Decimal("4.77"),
+            anchor_close=Decimal("11083.48"),
+        )
+        self.db.upsert_estimated_dp2(
+            trade_date="2026-09-04",
+            estimated_dp2=Decimal("4.80"),
+            index_point=Decimal("11050.00"),
+            anchor_date="2026-09-02",
+            anchor_dp2=Decimal("4.77"),
+            anchor_close=Decimal("11083.48"),
+        )
+        self.assertEqual(self.db.count_estimated_dp2(), 1)
+        got = self.db.get_estimated_dp2("2026-09-04")
+        self.assertIsNotNone(got)
+        self.assertEqual(got["estimated_dp2"], Decimal("4.80"))
+        self.assertEqual(got["index_point"], Decimal("11050.00"))
+        # 官方表数量不变
+        self.assertEqual(self.db.count(), official_before)
+
+    def test_different_trading_days_saved_separately(self):
+        self.db.upsert_estimated_dp2(
+            trade_date="2026-09-03",
+            estimated_dp2=Decimal("4.7745576678"),
+            index_point=Decimal("11072.90"),
+            anchor_date="2026-09-02",
+            anchor_dp2=Decimal("4.77"),
+            anchor_close=Decimal("11083.48"),
+        )
+        self.db.upsert_estimated_dp2(
+            trade_date="2026-09-04",
+            estimated_dp2=Decimal("4.80"),
+            index_point=Decimal("11050.00"),
+            anchor_date="2026-09-02",
+            anchor_dp2=Decimal("4.77"),
+            anchor_close=Decimal("11083.48"),
+        )
+        self.assertEqual(self.db.count_estimated_dp2(), 2)
+        all_rows = self.db.get_all_estimated_dp2()
+        self.assertEqual([r["trade_date"] for r in all_rows], ["2026-09-03", "2026-09-04"])
+
+    def test_does_not_write_official_valuation_table(self):
+        # 官方表为空时写入估算，官方 count 仍为 0
+        self.assertEqual(self.db.count(), 0)
+        self.db.upsert_estimated_dp2(
+            trade_date="2026-09-04",
+            estimated_dp2=Decimal("4.80"),
+            index_point=Decimal("11050.00"),
+            anchor_date="2026-09-02",
+            anchor_dp2=Decimal("4.77"),
+            anchor_close=Decimal("11083.48"),
+        )
+        self.assertEqual(self.db.count(), 0)
+        self.assertEqual(self.db.count_estimated_dp2(), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

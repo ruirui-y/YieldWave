@@ -203,6 +203,21 @@ class Database:
             )
             """
         )
+        # 每日估算 D/P2 历史：独立于官方 h30269_valuation，只保存“估算”口径。
+        # trade_date 唯一键：同一天再次运行时 UPDATE，每天只保留最新一条。
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS estimated_dp2_daily (
+                trade_date     TEXT PRIMARY KEY,
+                estimated_dp2  REAL,
+                index_point    REAL,
+                anchor_date    TEXT,
+                anchor_dp2     REAL,
+                anchor_close   REAL,
+                saved_at       TEXT
+            )
+            """
+        )
         self.conn.commit()
 
     # ---------- index close cache ----------
@@ -318,6 +333,95 @@ class Database:
             pre_close=r.get("pre_close"),
             source=r.get("source", "csindex"),
         )
+
+    # ---------- estimated dp2 daily ----------
+    def upsert_estimated_dp2(
+        self,
+        trade_date: str,
+        estimated_dp2,
+        index_point,
+        anchor_date: str,
+        anchor_dp2,
+        anchor_close,
+        saved_at: Optional[str] = None,
+    ) -> None:
+        """按 trade_date UPSERT 每日估算 D/P2。
+
+        - 当天第一次运行 -> INSERT
+        - 当天再次运行 -> UPDATE，只保留最新一条
+        - 与官方 h30269_valuation 完全独立，绝不混表
+        """
+        if estimated_dp2 is None:
+            return
+        self.conn.execute(
+            """
+            INSERT INTO estimated_dp2_daily
+                (trade_date, estimated_dp2, index_point, anchor_date,
+                 anchor_dp2, anchor_close, saved_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(trade_date) DO UPDATE SET
+                estimated_dp2=excluded.estimated_dp2,
+                index_point=excluded.index_point,
+                anchor_date=excluded.anchor_date,
+                anchor_dp2=excluded.anchor_dp2,
+                anchor_close=excluded.anchor_close,
+                saved_at=excluded.saved_at
+            """,
+            (
+                _to_dash(trade_date),
+                float(D(estimated_dp2)),
+                float(D(index_point)) if index_point is not None else None,
+                _to_dash(anchor_date) if anchor_date else None,
+                float(D(anchor_dp2)) if anchor_dp2 is not None else None,
+                float(D(anchor_close)) if anchor_close is not None else None,
+                saved_at or _now(),
+            ),
+        )
+        self.conn.commit()
+
+    def get_estimated_dp2(self, trade_date: str) -> Optional[dict]:
+        """按交易日读取一条估算 D/P2，Decimal 字段还原为 Decimal。"""
+        row = self.conn.execute(
+            "SELECT * FROM estimated_dp2_daily WHERE trade_date=?",
+            (_to_dash(trade_date),),
+        ).fetchone()
+        if not row:
+            return None
+        r = dict(row)
+        return {
+            "trade_date": r["trade_date"],
+            "estimated_dp2": D(r["estimated_dp2"]),
+            "index_point": D(r["index_point"]) if r["index_point"] is not None else None,
+            "anchor_date": r["anchor_date"],
+            "anchor_dp2": D(r["anchor_dp2"]) if r["anchor_dp2"] is not None else None,
+            "anchor_close": D(r["anchor_close"]) if r["anchor_close"] is not None else None,
+            "saved_at": r["saved_at"],
+        }
+
+    def get_all_estimated_dp2(self, ascending: bool = True) -> List[dict]:
+        """读取全部每日估算历史（按 trade_date 排序）。"""
+        order = "ASC" if ascending else "DESC"
+        rows = self.conn.execute(
+            f"SELECT * FROM estimated_dp2_daily ORDER BY trade_date {order}"
+        ).fetchall()
+        out = []
+        for row in rows:
+            r = dict(row)
+            out.append({
+                "trade_date": r["trade_date"],
+                "estimated_dp2": D(r["estimated_dp2"]),
+                "index_point": D(r["index_point"]) if r["index_point"] is not None else None,
+                "anchor_date": r["anchor_date"],
+                "anchor_dp2": D(r["anchor_dp2"]) if r["anchor_dp2"] is not None else None,
+                "anchor_close": D(r["anchor_close"]) if r["anchor_close"] is not None else None,
+                "saved_at": r["saved_at"],
+            })
+        return out
+
+    def count_estimated_dp2(self) -> int:
+        """统计已持久化的每日估算条数。"""
+        row = self.conn.execute("SELECT COUNT(*) FROM estimated_dp2_daily").fetchone()
+        return int(row[0]) if row else 0
 
     # ---------- valuation ----------
     def upsert_valuation(self, rec: ValuationRecord, commit: bool = True) -> None:

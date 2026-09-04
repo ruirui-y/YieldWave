@@ -32,6 +32,11 @@ WARNING = "#F59E0B"  # 警告黄
 
 DP2_LINE = "#38BDF8"   # 走势图 D/P2 主线（青蓝）
 M42_LINE = "#A3A3A3"  # 走势图 M42 中枢（灰）
+MEAN42_LINE = "#C084FC"  # 走势图 Mean42 平均数（紫，仅分析辅助，不参与策略）
+
+# 拐点研究标记（仅观察，不进入策略；顶/底用 marker v/^ 区分）
+TURN_PEAK = "#FDE047"      # D/P2 顶拐点（亮黄）
+TURN_TROUGH = "#22D3EE"    # D/P2 底拐点（亮青）
 
 # 买卖线一致配色（与 strategy 内 key 对齐）
 THRESHOLD_COLORS = {

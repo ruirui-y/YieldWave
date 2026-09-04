@@ -18,6 +18,8 @@ from yieldwave.strategy import (
     current_week_id,
     evaluate_position,
     generate_weekly_strategy,
+    rolling_mean,
+    rolling_median,
     valid_dp2_count,
     weekly_locked_thresholds_for_records,
 )
@@ -79,6 +81,47 @@ class TestMedians(unittest.TestCase):
         m = compute_medians(recs, {"M42": 42})
         last42 = [float(i) for i in range(50)][-42:]
         self.assertEqual(m["M42"], Decimal(str(statistics.median(last42))))
+
+
+class TestRollingMean(unittest.TestCase):
+    """新增 Mean42 平均数（仅观察辅助，不参与 A/B/C 策略）。
+
+    规则与 rolling_median 对齐：最近 window 个有效值、不足 window 用全部、空列表 None、
+    全程 Decimal、不提前 round、返回值经 D() 收口。
+    """
+
+    def test_full_window_mean(self):
+        # [1,2,3,4] window=4 -> (1+2+3+4)/4 = 2.5
+        vals = [Decimal("1"), Decimal("2"), Decimal("3"), Decimal("4")]
+        self.assertEqual(rolling_mean(vals, 4), Decimal("2.5"))
+
+    def test_partial_window_mean(self):
+        # [1,2,3,4] window=2 -> 取最后 2 个 (3+4)/2 = 3.5
+        vals = [Decimal("1"), Decimal("2"), Decimal("3"), Decimal("4")]
+        self.assertEqual(rolling_mean(vals, 2), Decimal("3.5"))
+
+    def test_empty_returns_none(self):
+        self.assertIsNone(rolling_mean([], 4))
+
+    def test_under_window_uses_all(self):
+        # 只有 3 个值，window=42 -> 用全部 3 个：(1+2+3)/3 = 2
+        vals = [Decimal("1"), Decimal("2"), Decimal("3")]
+        self.assertEqual(rolling_mean(vals, 42), Decimal("2"))
+
+    def test_decimal_precision_no_round(self):
+        # 4.83/4.84 偶数样本平均数 -> 4.835，保留完整 Decimal 精度
+        vals = [Decimal("4.83"), Decimal("4.84")]
+        self.assertEqual(rolling_mean(vals, 2), Decimal("4.835"))
+
+    def test_mean_differs_from_median(self):
+        # 均值与中位数必须可区分（验证 Mean42 是独立指标，不是 M42 别名）
+        vals = [Decimal("1"), Decimal("2"), Decimal("3"), Decimal("4")]
+        self.assertEqual(rolling_median(vals, 4), Decimal("2.5"))  # 中位数 (2+3)/2
+        self.assertEqual(rolling_mean(vals, 4), Decimal("2.5"))     # 此处均值也 2.5 仅巧合
+        # 偏态样本才能显现差异
+        skew = [Decimal("1"), Decimal("2"), Decimal("3"), Decimal("10")]
+        self.assertEqual(rolling_median(skew, 4), Decimal("2.5"))   # 中位数 (2+3)/2
+        self.assertEqual(rolling_mean(skew, 4), Decimal("4"))       # 均值 (1+2+3+10)/4
 
 
 class TestPercentPoints(unittest.TestCase):

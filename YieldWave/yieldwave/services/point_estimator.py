@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, DivisionByZero, InvalidOperation
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ..precision import D
 
@@ -84,6 +84,69 @@ def yield_to_target_point(
         return a_close * a_dp2 / tgt
     except (DivisionByZero, InvalidOperation):
         return None
+
+
+def assemble_estimated_tail(
+    anchor_date: str,
+    anchor_dp2: Decimal,
+    anchor_close: Decimal,
+    daily_closes: Dict[str, Decimal],
+    current_date: Optional[str],
+    current_point: Optional[Decimal],
+) -> List[Dict[str, object]]:
+    """组装 anchor 之后的估算 D/P2 尾巴（纯函数，无 IO，不进库、不进策略）。
+
+    规则（与文档完全一致）：
+    - 每个历史已结束交易日 -> estimate_current_dp2(anchor_dp2, anchor_close, 当日close)，
+      kind="close"（收盘反推）；
+    - 当前交易日 -> estimate_current_dp2(anchor_dp2, anchor_close, 实时current)，
+      kind="intraday"（盘中估算）；
+    - 所有点都【直接相对最后一个官方锚点】计算，绝不拿前一天估算值递归累乘
+      （公式固定为 anchor_dp2 * anchor_close / 当日点位，无链式误差）；
+    - 不人为生成周末/非交易日数据点：daily_closes 由调用方来自 fetch_close_range
+      （本身只含真实交易日），current_date 为当前真实交易日。
+
+    返回按日期升序的列表：[{date, dp2, index_point, kind}, ...]。
+    锚点日本身不进入尾巴（尾巴从 anchor 之后开始）。
+    """
+    tail: List[Dict[str, object]] = []
+    # 历史已结束交易日：用官方收盘反推（排除锚点日与当天）
+    for d in sorted(daily_closes.keys()):
+        if d == anchor_date:
+            continue
+        if current_date is not None and d == current_date:
+            continue  # 当天统一走盘中分支
+        close = D(daily_closes[d])
+        if close is None or close <= 0:
+            continue
+        dp2 = estimate_current_dp2(anchor_dp2, anchor_close, close)
+        if dp2 is None:
+            continue
+        tail.append({
+            "date": d,
+            "dp2": dp2,
+            "index_point": close,
+            "kind": "close",
+        })
+    # 当前交易日：用实时 current 反推（盘中估算）
+    if (
+        current_date is not None
+        and current_date != anchor_date
+        and current_point is not None
+        and D(current_point) is not None
+        and D(current_point) > 0
+    ):
+        cp = D(current_point)
+        dp2 = estimate_current_dp2(anchor_dp2, anchor_close, cp)
+        if dp2 is not None:
+            tail.append({
+                "date": current_date,
+                "dp2": dp2,
+                "index_point": cp,
+                "kind": "intraday",
+            })
+    tail.sort(key=lambda x: x["date"])
+    return tail
 
 
 def distance_to_target(current_point, target_point) -> Optional[Tuple[Decimal, Decimal]]:

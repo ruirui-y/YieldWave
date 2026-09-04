@@ -23,6 +23,9 @@ ACT_SELL = "SELL"
 ACT_HOLD = "HOLD"
 ACT_WAIT = "WAIT"
 
+# D/P2 拐点阈值（单位：百分点，例如 5.19 -> 5.13 的回落 = 0.06）
+TURN_THRESHOLD = Decimal("0.06")
+
 
 def rolling_median(values: List[Decimal], window: int) -> Optional[Decimal]:
     """最近 window 个有效值的中位数（不是自然日，是有效交易日条数）。
@@ -38,6 +41,144 @@ def rolling_median(values: List[Decimal], window: int) -> Optional[Decimal]:
     n = min(window, len(values))
     window_vals = values[-n:]
     return D(statistics.median(window_vals))
+
+
+def rolling_mean(values: List[Decimal], window: int) -> Optional[Decimal]:
+    """最近 window 个有效值的标准算术平均数（不是自然日，是有效交易日条数）。
+
+    与 rolling_median 规则一致：
+    - 不足 window 个时使用当前已有全部有效值；
+    - 空列表返回 None；
+    - 全程 Decimal，不提前 round，返回值经 D() 收口。
+
+    含义即：最近 N 个有效 D/P2 数值之和 / N（Decimal 整数除法）。
+    """
+    if not values:
+        return None
+    n = min(window, len(values))
+    window_vals = values[-n:]
+    if not window_vals:
+        return None
+    # 逐值经 D() 收口为 Decimal（兼容 float 来源的 D/P2，避免 float 求和再转 Decimal 的二进制污染），
+    # 再求和做标准算术平均；结果仍走 D() 收口。
+    s = sum((D(v) for v in window_vals), Decimal(0))
+    return D(s / Decimal(n))
+
+
+def _turning_item_date_dp2(item) -> Tuple[str, Decimal]:
+    """从纯计算输入中取出 (date, dp2)。
+
+    兼容两种常用形态：
+    - dict：{"date": "...", "dp2": ...}
+    - 记录对象：.date / .dp2（或策略模块的 .dividend_yield_2）
+
+    返回值 date 统一为 ISO 字符串，dp2 统一收口为 Decimal。
+    """
+    if isinstance(item, dict):
+        date = item.get("date")
+        dp2 = item.get("dp2")
+        if dp2 is None:
+            dp2 = item.get("dividend_yield_2")
+    elif isinstance(item, (tuple, list)) and len(item) >= 2:
+        date, dp2 = item[0], item[1]
+    else:
+        date = getattr(item, "date", None)
+        dp2 = getattr(item, "dp2", None)
+        if dp2 is None:
+            dp2 = getattr(item, "dividend_yield_2", None)
+    if dp2 is None:
+        raise ValueError("turning point input item must contain a dp2 value")
+    if isinstance(date, _dt.datetime):
+        date_str = date.date().isoformat()
+    elif isinstance(date, _dt.date):
+        date_str = date.isoformat()
+    else:
+        date_str = str(date)
+    return date_str, D(dp2)
+
+
+def _raw_directional_change_turns(
+    values,
+    threshold: Decimal,
+) -> List[Dict[str, object]]:
+    """纯 directional-change 扫描（不访问数据库 / Qt / Matplotlib）。
+
+    状态机从等待顶拐点开始：
+    - peak 状态跟踪最高 D/P2，直到从最高值回落 >= threshold，确认 peak；
+    - 随后切换 trough 状态跟踪最低 D/P2，直到从最低值反弹 >= threshold，确认 trough；
+    - 之后再次切回 peak，如此严格交替。
+
+    返回严格交替的已确认拐点列表。
+    """
+    out: List[Dict[str, object]] = []
+    state = "peak"
+    pivot_date: Optional[str] = None
+    pivot_dp2: Optional[Decimal] = None
+    for item in values:
+        date_str, dp2 = _turning_item_date_dp2(item)
+        if dp2 is None:
+            continue
+        if pivot_date is None:
+            pivot_date, pivot_dp2 = date_str, dp2
+            continue
+        if state == "peak":
+            if dp2 > pivot_dp2:
+                pivot_date, pivot_dp2 = date_str, dp2
+            elif pivot_dp2 - dp2 >= threshold:
+                out.append({
+                    "kind": "peak",
+                    "pivot_date": pivot_date,
+                    "pivot_dp2": pivot_dp2,
+                    "confirm_date": date_str,
+                    "confirm_dp2": dp2,
+                    "reversal": pivot_dp2 - dp2,
+                })
+                state = "trough"
+                pivot_date, pivot_dp2 = date_str, dp2
+        else:  # trough
+            if dp2 < pivot_dp2:
+                pivot_date, pivot_dp2 = date_str, dp2
+            elif dp2 - pivot_dp2 >= threshold:
+                out.append({
+                    "kind": "trough",
+                    "pivot_date": pivot_date,
+                    "pivot_dp2": pivot_dp2,
+                    "confirm_date": date_str,
+                    "confirm_dp2": dp2,
+                    "reversal": dp2 - pivot_dp2,
+                })
+                state = "peak"
+                pivot_date, pivot_dp2 = date_str, dp2
+    return out
+
+
+def detect_turning_points(
+    values,
+    threshold=Decimal("0.06"),
+) -> List[Dict[str, object]]:
+    """D/P2 拐点检测（纯计算，不访问数据库 / Qt / Matplotlib / 行情接口）。
+
+    parameters
+    ----------
+    values : 按日期升序的序列
+        每个元素可以是 dict {"date", "dp2"}，或带 .date/.dp2/.dividend_yield_2 的对象。
+    threshold : Decimal, default Decimal("0.06")
+        反向变化阈值，单位百分点（0.06 表示 D/P2 数值相差 0.06）。
+
+    返回已确认拐点，元素字段：
+    {
+        "kind": "peak" | "trough",
+        "pivot_date": "...",
+        "pivot_dp2": Decimal(...),
+        "confirm_date": "...",
+        "confirm_dp2": Decimal(...),
+        "reversal": Decimal(...)
+    }
+    """
+    th = D(threshold)
+    if th is None or th <= 0:
+        raise ValueError("threshold must be a positive Decimal")
+    return _raw_directional_change_turns(values, th)
 
 
 def compute_medians(

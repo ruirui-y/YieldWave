@@ -38,6 +38,7 @@ from ..precision import D, fmt_yield
 from ..services import market_quote
 from ..services.point_estimator import (
     Anchor,
+    assemble_estimated_tail,
     can_estimate,
     distance_to_target,
     estimate_current_dp2,
@@ -143,6 +144,8 @@ class MainWindow(QMainWindow):
         self.preview_thresholds: Dict[str, Decimal] = {}
         self.signals: Dict[str, Tuple[str, str]] = {}
         self.fetch_error: Optional[str] = None
+        # 官方 D/P2 滞后期间的估算尾巴（运行时数据，不写库、不进策略、不进 records）
+        self.estimated_dp2_tail: List[dict] = []
         # 盘中估算状态（独立于正式信号）
         self.anchor: Optional[Anchor] = None
         self.current_point: Optional[Decimal] = None  # 当前指数点位（Decimal 或 None）
@@ -434,13 +437,94 @@ class MainWindow(QMainWindow):
         self._update_hero()
         self._update_side_table()
         # 子组件刷新
+        self._refresh_chart()
+        self.trade_w.refresh()
+        self.data_w.refresh_stats()
+
+    def _refresh_chart(self) -> None:
+        """构建官方 D/P2 滞后期间的估算尾巴并刷新走势图。
+
+        估算尾巴只用于把红利查滞后的交易日补到图上观察真实拐点：
+        - 不写 h30269_valuation 数据库；
+        - 不并入 self._records（官方与估算始终分开）；
+        - 不参与 M42 / Mean42 / A/B/C 策略。
+        """
+        self.estimated_dp2_tail = self._build_estimated_tail()
         self.chart_w.set_data(
             self.records,
             self.thresholds if self.locked else self.preview_thresholds,
             weekly_m42=(self.weekly.m42 if self.weekly else None),
+            estimated_dp2_tail=self.estimated_dp2_tail,
         )
-        self.trade_w.refresh()
-        self.data_w.refresh_stats()
+
+    def _persist_daily_estimated_dp2(self, trade_date: Optional[str]) -> None:
+        """把当天成功取得的行情估算 D/P2 持久化到独立表。
+
+        只保存：
+        - 有真实 trade_date（即交易日）
+        - anchor 有效（官方 D/P2 锚点 + 收盘）
+        - 当前指数点位有效
+        同一天重复调用由数据库按 trade_date UPSERT，每天只留最新一条。
+        """
+        if not trade_date:
+            return
+        if self.anchor is None or not self.anchor.valid():
+            return
+        if self.current_point is None or self.current_point <= 0:
+            return
+        est = estimate_current_dp2(
+            self.anchor.dp2,
+            self.anchor.close,
+            self.current_point,
+        )
+        if est is None:
+            return
+        self.db.upsert_estimated_dp2(
+            trade_date=trade_date,
+            estimated_dp2=est,
+            index_point=self.current_point,
+            anchor_date=self.anchor.date,
+            anchor_dp2=self.anchor.dp2,
+            anchor_close=self.anchor.close,
+        )
+
+    def _build_estimated_tail(self) -> List[dict]:
+        """生成本地运行时的估算 D/P2 尾巴（anchor 之后、未公布官方 D/P2 的交易日）。
+
+        公式固定为 anchor_dp2 * anchor_close / 当日点位，所有点都【直接相对最后一个官方锚点】
+        计算，绝不拿前一天估算值递归（无链式误差）。周末/非交易日不人为生成数据点。
+
+        返回结构固定：[{date, dp2(Decimal), index_point(Decimal), kind}, ...]
+        kind="close"  用已结束交易日官方收盘反推
+        kind="intraday"  当天用实时 current 反推
+        anchor 无效 / 无当前点位时返回空列表。
+        """
+        if self.anchor is None or not self.anchor.valid():
+            return []
+        if self.current_point is None or self.current_point <= 0:
+            return []
+        anchor_date = self.anchor.date
+        anchor_d = _dt.date.fromisoformat(anchor_date)
+        # 当天（盘中）交易日：优先用实时行情 trade_date，否则回退到今天
+        intraday_date = None
+        if self.current_quote is not None and self.current_quote.trade_date:
+            intraday_date = self.current_quote.trade_date
+        else:
+            intraday_date = _dt.date.today().isoformat()
+        # 拉取 anchor 之后到当天的每日收盘（已结束交易日，不含 anchor 当天）
+        start = (anchor_d + _dt.timedelta(days=1)).isoformat()
+        daily_closes, _err = market_quote.fetch_close_range(start, intraday_date)
+        # 网络失败 / 当日无数据 -> 不崩，返回空尾巴（UI 照常显示官方曲线）
+        if not daily_closes:
+            return []
+        return assemble_estimated_tail(
+            anchor_date=anchor_date,
+            anchor_dp2=self.anchor.dp2,
+            anchor_close=self.anchor.close,
+            daily_closes=daily_closes,
+            current_date=intraday_date,
+            current_point=self.current_point,
+        )
 
     def _update_anchor(self) -> None:
         """从 self.latest 取 anchor_date / anchor_dp2；anchor_close 取缓存或网络。"""
@@ -495,14 +579,14 @@ class MainWindow(QMainWindow):
     def _on_anchor_close_fetched(self, close, err) -> None:
         if close is not None and self.anchor is not None:
             self.anchor = Anchor(date=self.anchor.date, dp2=self.anchor.dp2, close=D(close))
+            # 如果当前行情点位已经在手，只是此前因缺 anchor_close 无法保存，
+            # 现在补存当天估算 D/P2。
+            if self.current_quote is not None:
+                self._persist_daily_estimated_dp2(self.current_quote.trade_date)
             self._update_kpi()
             self._update_hero()
             self._update_side_table()
-            self.chart_w.set_data(
-                self.records,
-                self.thresholds if self.locked else self.preview_thresholds,
-                weekly_m42=(self.weekly.m42 if self.weekly else None),
-            )
+            self._refresh_chart()
         elif err:
             print(f"[行情] anchor_close 抓取失败：{err}", flush=True)
 
@@ -555,11 +639,15 @@ class MainWindow(QMainWindow):
             # 手工 override 仍优先
             if self.manual_point_override is None:
                 self.current_point = D(quote.current)
+                # 成功取得当天行情并算出估算 D/P2 后，持久化一天一条
+                self._persist_daily_estimated_dp2(quote.trade_date)
         else:
             self.quote_error = err or "行情抓取失败，使用最后一次成功数据"
         self._update_kpi()
         self._update_hero()
         self._update_side_table()
+        # 行情刷新成功且 anchor 有效 -> 重建估算尾巴并刷新走势图
+        self._refresh_chart()
 
     def update_signals(self) -> None:
         m42 = self.medians.get("M42")
